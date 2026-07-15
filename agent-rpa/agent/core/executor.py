@@ -163,6 +163,6 @@ class Executor:
         if target.startswith(("#", ".", "[", ":")):
             return target
 
-        # 默认作为文本选择器
+        # 与 SnapshotGenerator 统一，使用 :has-text() 子串匹配
         safe = target.replace('"', '\\"')
-        return f'text="{safe}"'
+        return f':has-text("{safe}")'

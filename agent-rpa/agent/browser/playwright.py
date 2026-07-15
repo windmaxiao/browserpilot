@@ -81,13 +81,16 @@ class BrowserTool:
         try:
             locator = self._page.locator(selector)
             await locator.wait_for(state="visible", timeout=timeout)
+            old_url = self._page.url
             await locator.click(force=force, timeout=timeout)
             # 等待页面稳定
             await self._smart_wait()
+            new_url = self._page.url
+            new_title = await self._page.title()
             return Observation.ok(
-                url=self._page.url,
-                title=await self._page.title(),
-                page_changed=True,
+                url=new_url,
+                title=new_title,
+                page_changed=(new_url != old_url),
             )
         except Exception as e:
             return Observation.fail(error=f"点击失败: {e}", url=self._page.url)
@@ -123,11 +126,13 @@ class BrowserTool:
         try:
             locator = self._page.locator(selector)
             await locator.wait_for(state="visible", timeout=timeout)
+            old_url = self._page.url
             await locator.select_option(value)
+            new_url = self._page.url
             return Observation.ok(
-                url=self._page.url,
+                url=new_url,
                 title=await self._page.title(),
-                page_changed=True,
+                page_changed=(new_url != old_url),
             )
         except Exception as e:
             return Observation.fail(error=f"选择失败: {e}", url=self._page.url)
