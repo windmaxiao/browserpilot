@@ -6,7 +6,8 @@ V0.2+ 使用：需要先实现 Planner。
 """
 
 import asyncio
-import logging
+
+from loguru import logger
 
 from agent.browser.playwright import BrowserManager
 from agent.browser.snapshot import SnapshotGenerator
@@ -14,9 +15,6 @@ from agent.core.agent import Agent
 from agent.core.executor import Executor
 from agent.core.observer import Observer
 from agent.schema.action import goto, click, done
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 
 async def main():
@@ -46,15 +44,15 @@ async def main():
 
         # 观察页面
         snapshot = await agent.observe()
-        print(f"当前页面: {snapshot.url}")
+        logger.info("当前页面: {}", snapshot.url)
 
         # 执行动作
         obs = await agent.step(goto("https://www.baidu.com"))
-        print(f"导航: {obs.success}")
+        logger.info("导航: {}", obs.success)
 
         snapshot = await agent.observe()
-        print(f"页面标题: {snapshot.title}")
-        print(f"可交互元素: {len(snapshot.get_interactive_elements())}")
+        logger.info("页面标题: {}", snapshot.title)
+        logger.info("可交互元素: {}", len(snapshot.get_interactive_elements()))
 
         await asyncio.sleep(2)
 

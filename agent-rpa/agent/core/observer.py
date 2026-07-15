@@ -7,6 +7,8 @@ Observer —— 观察者
 
 from __future__ import annotations
 
+from loguru import logger
+
 from agent.browser.snapshot import SnapshotGenerator
 from agent.schema.snapshot import Snapshot
 
@@ -23,6 +25,7 @@ class Observer:
 
     def __init__(self, snapshot_generator: SnapshotGenerator):
         self._generator = snapshot_generator
+        logger.debug("Observer 初始化完成")
 
     async def observe(self) -> Snapshot:
         """
@@ -31,12 +34,18 @@ class Observer:
         Returns:
             Snapshot: 当前页面的结构化认知
         """
+        logger.info("生成页面 Snapshot...")
         snapshot = await self._generator.generate()
 
-        # 检测页面类型
         if not snapshot.page_type:
             snapshot.page_type = await self._generator.detect_page_type()
 
+        logger.info(
+            "Snapshot 就绪 | title={} | 交互元素={} | page_type={}",
+            snapshot.title,
+            len(snapshot.get_interactive_elements()),
+            snapshot.page_type,
+        )
         return snapshot
 
     async def observe_simplified(self) -> dict:
@@ -47,8 +56,7 @@ class Observer:
             dict: 包含页面摘要信息的字典
         """
         snapshot = await self.observe()
-
-        return {
+        simplified = {
             "title": snapshot.title,
             "url": snapshot.url,
             "page_type": snapshot.page_type,
@@ -56,3 +64,5 @@ class Observer:
             "interactive_count": len(snapshot.get_interactive_elements()),
             "loading": snapshot.loading,
         }
+        logger.debug("简化版 Snapshot: {}", simplified["summary"])
+        return simplified

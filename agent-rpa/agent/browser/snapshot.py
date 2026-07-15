@@ -12,6 +12,9 @@ Snapshot 是 Agent 对网页的"认知"，不是 HTML。
 
 from __future__ import annotations
 
+import time
+
+from loguru import logger
 from playwright.async_api import Page
 
 from agent.schema.snapshot import ElementInfo, Snapshot
@@ -27,9 +30,12 @@ class SnapshotGenerator:
 
     def __init__(self, page: Page):
         self._page = page
+        logger.debug("SnapshotGenerator 创建")
 
     async def generate(self) -> Snapshot:
         """生成当前页面的 Snapshot"""
+        logger.info("📄 生成 Snapshot...")
+        start = time.time()
         title = await self._page.title()
         url = self._page.url
 
@@ -40,6 +46,13 @@ class SnapshotGenerator:
         texts = await self._extract_texts()
         selects = await self._extract_selects()
         loading = await self._is_loading()
+
+        elapsed = time.time() - start
+        logger.info(
+            "Snapshot 生成完成 | 按钮={} 输入框={} 链接={} 文本块={} 下拉={} | 加载={} | {:.1f}s",
+            len(buttons), len(inputs), len(links), len(texts), len(selects),
+            loading, elapsed,
+        )
 
         return Snapshot(
             title=title,
@@ -75,7 +88,6 @@ class SnapshotGenerator:
         for i, el in enumerate(elements):
             info = await self._extract_element_info(el, i)
             if info:
-                # 补充 placeholder
                 try:
                     info.placeholder = await el.get_attribute("placeholder") or ""
                 except Exception:
@@ -153,7 +165,7 @@ class SnapshotGenerator:
                 pass
 
             return ElementInfo(
-                text=text[:200],  # 限制长度
+                text=text[:200],
                 tag=tag,
                 element_type=self._infer_type(tag),
                 selector=selector,
@@ -166,13 +178,10 @@ class SnapshotGenerator:
 
     async def _build_selector(self, el, tag: str, text: str) -> str:
         """为元素生成 Playwright 选择器"""
-        # 优先用文本选择器
         if text and tag in ("button", "a", "label"):
-            # 转义引号
             safe_text = text.replace('"', '\\"')
             return f'{tag}:has-text("{safe_text}")'
 
-        # 用 id
         el_id = ""
         try:
             el_id = await el.get_attribute("id") or ""
@@ -181,7 +190,6 @@ class SnapshotGenerator:
         if el_id:
             return f"#{el_id}"
 
-        # 用 data-testid
         testid = ""
         try:
             testid = await el.get_attribute("data-testid") or ""
@@ -190,7 +198,6 @@ class SnapshotGenerator:
         if testid:
             return f'[data-testid="{testid}"]'
 
-        # 用 role
         role = ""
         try:
             role = await el.get_attribute("role") or ""
@@ -199,7 +206,6 @@ class SnapshotGenerator:
         if role:
             return f'[role="{role}"]'
 
-        # 用 aria-label
         aria = ""
         try:
             aria = await el.get_attribute("aria-label") or ""
@@ -208,7 +214,6 @@ class SnapshotGenerator:
         if aria:
             return f'[aria-label="{aria}"]'
 
-        # 回退：用标签名和文本
         if text:
             safe_text = text.replace('"', '\\"')
             return f'{tag}:has-text("{safe_text[:50]}")'
@@ -230,9 +235,7 @@ class SnapshotGenerator:
     async def _is_loading(self) -> bool:
         """判断页面是否处于加载状态"""
         try:
-            state = await self._page.evaluate(
-                "document.readyState"
-            )
+            state = await self._page.evaluate("document.readyState")
             return state != "complete"
         except Exception:
             return True

@@ -64,14 +64,16 @@ class Observation:
         url: Optional[str] = None,
         title: Optional[str] = None,
         page_changed: bool = False,
-        **data,
+        data: Optional[dict] = None,
+        **kwargs,
     ) -> Observation:
+        merged = {**(data or {}), **kwargs}
         return cls(
             success=True,
             url=url,
             title=title,
             page_changed=page_changed,
-            data=data,
+            data=merged,
         )
 
     @classmethod

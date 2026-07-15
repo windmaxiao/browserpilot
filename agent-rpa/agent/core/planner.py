@@ -12,6 +12,8 @@ V0.1 中使用规则实现（Rule-based），V0.3 后替换为 LLM。
 
 from __future__ import annotations
 
+from loguru import logger
+
 from agent.schema.action import Action
 from agent.schema.snapshot import Snapshot
 
@@ -36,6 +38,7 @@ class Planner:
         Returns:
             下一步 Action，或 None 表示无法规划
         """
+        logger.warning("Planner.plan() 未实现（V0.1 骨架），无法规划动作")
         # TODO(V0.2): 实现规则引擎
         # TODO(V0.3): 替换为 LLM 调用
         raise NotImplementedError("Planner 尚未实现")
@@ -57,6 +60,7 @@ class Planner:
         Returns:
             下一步 Action
         """
+        logger.debug("plan_with_history 调用，历史记录数: {}", len(history))
         return await self.plan(snapshot, goal)
 
 
@@ -72,13 +76,18 @@ class RuleBasedPlanner(Planner):
 
     def __init__(self):
         self._rules: list[tuple] = []
+        logger.info("RuleBasedPlanner 初始化，规则数: 0")
 
     def add_rule(self, condition, action_fn):
         """添加规则：condition(snapshot, goal) → bool, action_fn(snapshot) → Action"""
         self._rules.append((condition, action_fn))
+        logger.debug("添加规则，当前规则总数: {}", len(self._rules))
 
     async def plan(self, snapshot: Snapshot, goal: str) -> Action | None:
-        for condition, action_fn in self._rules:
+        for i, (condition, action_fn) in enumerate(self._rules):
             if condition(snapshot, goal):
-                return action_fn(snapshot)
+                action = action_fn(snapshot)
+                logger.info("规则 {} 命中 → action: {}", i + 1, action.action)
+                return action
+        logger.debug("无规则命中，返回 None")
         return None

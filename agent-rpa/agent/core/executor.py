@@ -7,6 +7,8 @@ Executor 是 Agent 与 Browser Tool 之间的桥梁。
 
 from __future__ import annotations
 
+from loguru import logger
+
 from agent.browser.playwright import BrowserTool
 from agent.schema.action import Action
 from agent.schema.observation import Observation
@@ -20,6 +22,7 @@ class Executor:
 
     def __init__(self, browser_tool: BrowserTool):
         self._tool = browser_tool
+        logger.debug("Executor 初始化完成")
 
     async def execute(self, action: Action) -> Observation:
         """
@@ -29,6 +32,7 @@ class Executor:
         """
         errors = action.validate()
         if errors:
+            logger.warning("Action 验证失败: {}", "; ".join(errors))
             return Observation.fail(
                 error=f"Action 验证失败: {'; '.join(errors)}",
             )
@@ -50,8 +54,10 @@ class Executor:
 
         handler = dispatch.get(action.action)
         if handler is None:
+            logger.error("未知动作类型: {}", action.action)
             return Observation.fail(error=f"未知动作: {action.action}")
 
+        logger.debug("分发动: {} | target={}", action.action, action.target)
         return await handler(action)
 
     # ── 各动作的具体执行 ────────────────────────────────────────────
@@ -59,84 +65,102 @@ class Executor:
     async def _execute_click(self, action: Action) -> Observation:
         if action.target:
             selector = self._resolve_selector(action.target, action.params)
+            logger.debug("click → selector: {}", selector)
             return await self._tool.click(
                 selector,
                 timeout=action.params.get("timeout", 5000),
                 force=action.params.get("force", False),
             )
+        logger.warning("click 动作缺少 target")
         return Observation.fail(error="click 动作缺少 target")
 
     async def _execute_input(self, action: Action) -> Observation:
         if action.target and action.value is not None:
             selector = self._resolve_selector(action.target, action.params)
+            logger.debug("input → selector: {} | value: {}", selector, action.value[:80])
             return await self._tool.input(
                 selector,
                 action.value,
                 timeout=action.params.get("timeout", 5000),
                 clear_first=action.params.get("clear_first", True),
             )
+        logger.warning("input 动作缺少 target 或 value")
         return Observation.fail(error="input 动作缺少 target 或 value")
 
     async def _execute_select(self, action: Action) -> Observation:
         if action.target and action.value is not None:
             selector = self._resolve_selector(action.target, action.params)
+            logger.debug("select → selector: {} | value: {}", selector, action.value)
             return await self._tool.select(
                 selector,
                 action.value,
                 timeout=action.params.get("timeout", 5000),
             )
+        logger.warning("select 动作缺少 target 或 value")
         return Observation.fail(error="select 动作缺少 target 或 value")
 
     async def _execute_goto(self, action: Action) -> Observation:
         if action.value:
+            logger.debug("goto → URL: {}", action.value)
             return await self._tool.goto(
                 action.value,
                 timeout=action.params.get("timeout", 30000),
             )
+        logger.warning("goto 动作缺少 URL")
         return Observation.fail(error="goto 动作缺少 URL")
 
     async def _execute_scroll(self, action: Action) -> Observation:
         direction = action.params.get("direction", "down")
         amount = action.params.get("amount", 300)
+        logger.debug("scroll → direction: {} | amount: {}", direction, amount)
         return await self._tool.scroll(direction=direction, amount=amount)
 
     async def _execute_wait(self, action: Action) -> Observation:
         ms = action.params.get("ms", 1000)
+        logger.debug("wait → {}ms", ms)
         return await self._tool.wait(ms=ms)
 
     async def _execute_download(self, action: Action) -> Observation:
         if action.target:
             selector = self._resolve_selector(action.target, action.params)
             save_path = action.params.get("save_path")
+            logger.info("下载文件 → selector: {} | save_path: {}", selector, save_path)
             return await self._tool.download(
                 selector,
                 save_path=save_path,
                 timeout=action.params.get("timeout", 30000),
             )
+        logger.warning("download 动作缺少 target")
         return Observation.fail(error="download 动作缺少 target")
 
     async def _execute_upload(self, action: Action) -> Observation:
         if action.target and action.value:
             selector = self._resolve_selector(action.target, action.params)
+            logger.info("上传文件 → selector: {} | file: {}", selector, action.value)
             return await self._tool.upload(
                 selector,
                 action.value,
                 timeout=action.params.get("timeout", 10000),
             )
+        logger.warning("upload 动作缺少 target 或 value (file path)")
         return Observation.fail(error="upload 动作缺少 target 或 value (file path)")
 
     async def _execute_back(self, action: Action) -> Observation:
+        logger.debug("浏览器后退")
         return await self._tool.back()
 
     async def _execute_refresh(self, action: Action) -> Observation:
+        logger.debug("刷新页面")
         return await self._tool.refresh()
 
     async def _execute_screenshot(self, action: Action) -> Observation:
         full_page = action.params.get("full_page", True)
+        logger.info("截取页面截图 | full_page={}", full_page)
         return await self._tool.screenshot(full_page=full_page)
 
     async def _execute_done(self, action: Action) -> Observation:
         """任务完成标志"""
+        logger.info("🏁 任务完成: {}", action.value or "无备注")
         return Observation.ok(
             url=self._tool.current_url,
             title=await self._tool.current_title,
@@ -154,15 +178,12 @@ class Executor:
         1. params 中显式指定的 selector
         2. 语义化文本匹配
         """
-        # 如果 params 里有显式 selector，优先使用
         explicit = params.get("selector")
         if explicit:
             return explicit
 
-        # 如果是 CSS 选择器风格的 target，直接使用
         if target.startswith(("#", ".", "[", ":")):
             return target
 
-        # 与 SnapshotGenerator 统一，使用 :has-text() 子串匹配
         safe = target.replace('"', '\\"')
         return f':has-text("{safe}")'

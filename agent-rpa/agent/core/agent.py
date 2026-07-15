@@ -15,8 +15,9 @@ Goal → Snapshot → Planner → Action → Executor → Observation → Loop
 
 from __future__ import annotations
 
-import logging
 from typing import Optional
+
+from loguru import logger
 
 from agent.core.executor import Executor
 from agent.core.observer import Observer
@@ -24,8 +25,6 @@ from agent.core.planner import Planner
 from agent.schema.action import Action, done
 from agent.schema.observation import Observation
 from agent.schema.snapshot import Snapshot
-
-logger = logging.getLogger(__name__)
 
 
 class Agent:
@@ -54,6 +53,8 @@ class Agent:
         self._history: list[dict] = []
         self._current_step: int = 0
         self._goal: str = ""
+
+        logger.debug("Agent 初始化完成 | max_steps={}", max_steps)
 
     # ── 公开接口 ────────────────────────────────────────────────────
 
@@ -84,21 +85,22 @@ class Agent:
         self._history.clear()
         self._current_step = 0
 
-        logger.info(f"Agent 启动 | 目标: {goal}")
+        logger.info("🧠 Agent 启动 | 目标: {}", goal)
 
         while self._current_step < self._max_steps:
             self._current_step += 1
 
             # 1. Observe
-            logger.info(f"[Step {self._current_step}] 观察页面...")
+            logger.info("📷 [Step {}/{}] 观察页面...", self._current_step, self._max_steps)
             snapshot = await self._observer.observe()
             self._log_snapshot(snapshot)
 
             # 2. Plan
-            logger.info(f"[Step {self._current_step}] 规划动作...")
+            logger.info("📝 [Step {}/{}] 规划动作...", self._current_step, self._max_steps)
             action = await self._planner.plan(snapshot, goal)
 
             if action is None:
+                logger.warning("⚠️  [Step {}] 无法规划出有效动作", self._current_step)
                 return Observation.fail(
                     error=f"在第 {self._current_step} 步无法规划出有效动作",
                     url=snapshot.url,
@@ -106,7 +108,7 @@ class Agent:
 
             # 3. Check done
             if action.action == "done":
-                logger.info(f"Agent 完成任务: {action.value or goal}")
+                logger.info("✅ Agent 完成任务: {}", action.value or goal)
                 return Observation.ok(
                     url=snapshot.url,
                     title=snapshot.title,
@@ -114,9 +116,10 @@ class Agent:
                 )
 
             # 4. Execute
-            logger.info(
-                f"[Step {self._current_step}] 执行: {action.action}({action.target})"
-            )
+            log_action = f"{action.action}({action.target})"
+            if action.value:
+                log_action += f" = {action.value[:50]}"
+            logger.info("⚡ [Step {}] 执行: {}", self._current_step, log_action)
             observation = await self._executor.execute(action)
 
             # 5. Record history
@@ -128,13 +131,14 @@ class Agent:
 
             # 6. Check failure
             if observation.is_error:
-                logger.warning(
-                    f"[Step {self._current_step}] 动作失败: {observation.error}"
-                )
+                logger.warning("❌ [Step {}] 动作失败: {}", self._current_step, observation.error)
                 # TODO(V0.4): 触发 Reflection 重试
                 return observation
 
+            logger.info("✅ [Step {}] 成功 | URL: {}", self._current_step, observation.url)
+
         # 超出最大步数
+        logger.warning("⚠️  超出最大步数限制 ({})", self._max_steps)
         return Observation.fail(
             error=f"超出最大步数限制 ({self._max_steps})",
         )
@@ -149,11 +153,23 @@ class Agent:
         Returns:
             执行结果 Observation
         """
-        return await self._executor.execute(action)
+        log_action = f"{action.action}({action.target})"
+        if action.value:
+            log_action += f" = {action.value[:50]}"
+        logger.info("⚡ 手动执行: {}", log_action)
+        result = await self._executor.execute(action)
+        if result.is_error:
+            logger.warning("❌ 手动执行失败: {}", result.error)
+        else:
+            logger.info("✅ 手动执行成功 | URL: {}", result.url)
+        return result
 
     async def observe(self) -> Snapshot:
         """获取当前页面的 Snapshot（手动模式 / 调试用）"""
-        return await self._observer.observe()
+        logger.info("📷 观察页面...")
+        snapshot = await self._observer.observe()
+        self._log_snapshot(snapshot)
+        return snapshot
 
     # ── 内部方法 ────────────────────────────────────────────────────
 
@@ -162,7 +178,9 @@ class Agent:
         btn_count = len(snapshot.buttons)
         input_count = len(snapshot.inputs)
         link_count = len(snapshot.links)
-        logger.debug(
-            f"页面: {snapshot.title} | "
-            f"按钮={btn_count} 输入框={input_count} 链接={link_count}"
+        select_count = len(snapshot.selects)
+        logger.info(
+            "📄 页面: {} | URL: {} | 按钮={} 输入框={} 链接={} 下拉={}",
+            snapshot.title, snapshot.url,
+            btn_count, input_count, link_count, select_count,
         )

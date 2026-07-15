@@ -13,9 +13,11 @@ Agent 不直接调用 Playwright API，通过本模块间接操作浏览器。
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Optional
 
+from loguru import logger
 from playwright.async_api import Page, Playwright, async_playwright
 
 from agent.schema.observation import Observation
@@ -42,6 +44,7 @@ class BrowserTool:
 
     def __init__(self, page: Page):
         self._page = page
+        logger.debug("BrowserTool 创建 | URL: {}", page.url)
 
     # ── 页面属性 ────────────────────────────────────────────────────
 
@@ -61,14 +64,21 @@ class BrowserTool:
 
     async def goto(self, url: str, timeout: int = 30000) -> Observation:
         """导航到指定 URL"""
+        logger.info("🌐 goto: {}", url)
+        start = time.time()
         try:
             await self._page.goto(url, timeout=timeout, wait_until="load")
+            elapsed = time.time() - start
+            logger.info("✅ goto 完成 | URL: {} | title: {} | {:.1f}s",
+                        self._page.url, await self._page.title(), elapsed)
             return Observation.ok(
                 url=self._page.url,
                 title=await self._page.title(),
                 page_changed=True,
             )
         except Exception as e:
+            elapsed = time.time() - start
+            logger.error("❌ goto 失败 | URL: {} | {:.1f}s | 错误: {}", url, elapsed, e)
             return Observation.fail(error=f"导航失败: {e}", url=self._page.url)
 
     async def click(
@@ -78,21 +88,31 @@ class BrowserTool:
         force: bool = False,
     ) -> Observation:
         """点击元素"""
+        logger.info("🖱️ click: {}", selector)
+        start = time.time()
         try:
             locator = self._page.locator(selector)
             await locator.wait_for(state="visible", timeout=timeout)
             old_url = self._page.url
             await locator.click(force=force, timeout=timeout)
-            # 等待页面稳定
             await self._smart_wait()
             new_url = self._page.url
             new_title = await self._page.title()
+            elapsed = time.time() - start
+            changed = new_url != old_url
+            if changed:
+                logger.info("✅ click 完成 | 发生跳转 → {} | {:.1f}s", new_url, elapsed)
+            else:
+                logger.info("✅ click 完成 | 页面无跳转 | {:.1f}s", elapsed)
             return Observation.ok(
                 url=new_url,
                 title=new_title,
-                page_changed=(new_url != old_url),
+                page_changed=changed,
             )
         except Exception as e:
+            elapsed = time.time() - start
+            logger.error("❌ click 失败 | selector: {} | {:.1f}s | 错误: {}",
+                         selector, elapsed, e)
             return Observation.fail(error=f"点击失败: {e}", url=self._page.url)
 
     async def input(
@@ -103,17 +123,24 @@ class BrowserTool:
         clear_first: bool = True,
     ) -> Observation:
         """输入文本"""
+        logger.info("⌨️ input: {} | text: {}", selector, text[:80])
+        start = time.time()
         try:
             locator = self._page.locator(selector)
             await locator.wait_for(state="visible", timeout=timeout)
             if clear_first:
                 await locator.clear()
             await locator.fill(text)
+            elapsed = time.time() - start
+            logger.info("✅ input 完成 | {} | {:.1f}s", selector, elapsed)
             return Observation.ok(
                 url=self._page.url,
                 title=await self._page.title(),
             )
         except Exception as e:
+            elapsed = time.time() - start
+            logger.error("❌ input 失败 | selector: {} | {:.1f}s | 错误: {}",
+                         selector, elapsed, e)
             return Observation.fail(error=f"输入失败: {e}", url=self._page.url)
 
     async def select(
@@ -123,18 +150,25 @@ class BrowserTool:
         timeout: int = 5000,
     ) -> Observation:
         """下拉选择"""
+        logger.info("📋 select: {} → {}", selector, value)
+        start = time.time()
         try:
             locator = self._page.locator(selector)
             await locator.wait_for(state="visible", timeout=timeout)
             old_url = self._page.url
             await locator.select_option(value)
             new_url = self._page.url
+            elapsed = time.time() - start
+            logger.info("✅ select 完成 | {} | {:.1f}s", selector, elapsed)
             return Observation.ok(
                 url=new_url,
                 title=await self._page.title(),
                 page_changed=(new_url != old_url),
             )
         except Exception as e:
+            elapsed = time.time() - start
+            logger.error("❌ select 失败 | selector: {} | {:.1f}s | 错误: {}",
+                         selector, elapsed, e)
             return Observation.fail(error=f"选择失败: {e}", url=self._page.url)
 
     async def scroll(
@@ -143,6 +177,8 @@ class BrowserTool:
         amount: int = 300,
     ) -> Observation:
         """滚动页面"""
+        logger.debug("📜 scroll: {} | {}", direction, amount)
+        start = time.time()
         try:
             delta_y = amount if direction == "down" else -amount
             if direction in ("down", "up"):
@@ -154,15 +190,19 @@ class BrowserTool:
             elif direction == "top":
                 await self._page.evaluate("window.scrollTo(0, 0)")
             await asyncio.sleep(0.3)
+            elapsed = time.time() - start
+            logger.debug("✅ scroll 完成 | {:.1f}s", elapsed)
             return Observation.ok(
                 url=self._page.url,
                 title=await self._page.title(),
             )
         except Exception as e:
+            logger.error("❌ scroll 失败: {}", e)
             return Observation.fail(error=f"滚动失败: {e}", url=self._page.url)
 
     async def wait(self, ms: int = 1000) -> Observation:
         """等待指定毫秒数"""
+        logger.debug("⏳ wait: {}ms", ms)
         await asyncio.sleep(ms / 1000)
         return Observation.ok(
             url=self._page.url,
@@ -176,6 +216,8 @@ class BrowserTool:
         timeout: int = 30000,
     ) -> Observation:
         """下载文件"""
+        logger.info("⬇️ download: {}", selector)
+        start = time.time()
         try:
             async with self._page.expect_download(timeout=timeout) as download_info:
                 locator = self._page.locator(selector)
@@ -185,12 +227,16 @@ class BrowserTool:
             target_path = save_path or Path.cwd() / download.suggested_filename
             await download.save_as(str(target_path))
 
+            elapsed = time.time() - start
+            logger.info("✅ download 完成 | 保存到: {} | {:.1f}s", target_path, elapsed)
             return Observation.ok(
                 url=self._page.url,
                 title=await self._page.title(),
                 data={"download_path": str(target_path)},
             )
         except Exception as e:
+            elapsed = time.time() - start
+            logger.error("❌ download 失败 | {:.1f}s | 错误: {}", elapsed, e)
             return Observation.fail(error=f"下载失败: {e}", url=self._page.url)
 
     async def upload(
@@ -200,53 +246,74 @@ class BrowserTool:
         timeout: int = 10000,
     ) -> Observation:
         """上传文件"""
+        logger.info("⬆️ upload: {} → {}", selector, file_path)
+        start = time.time()
         try:
             locator = self._page.locator(selector)
             await locator.wait_for(state="visible", timeout=timeout)
             await locator.set_input_files(str(file_path))
+            elapsed = time.time() - start
+            logger.info("✅ upload 完成 | {:.1f}s", elapsed)
             return Observation.ok(
                 url=self._page.url,
                 title=await self._page.title(),
             )
         except Exception as e:
+            logger.error("❌ upload 失败: {}", e)
             return Observation.fail(error=f"上传失败: {e}", url=self._page.url)
 
     async def back(self) -> Observation:
         """浏览器后退"""
+        logger.info("◀️ back")
+        start = time.time()
         try:
             await self._page.go_back(wait_until="load")
+            elapsed = time.time() - start
+            logger.info("✅ back 完成 | URL: {} | {:.1f}s", self._page.url, elapsed)
             return Observation.ok(
                 url=self._page.url,
                 title=await self._page.title(),
                 page_changed=True,
             )
         except Exception as e:
+            logger.error("❌ back 失败: {}", e)
             return Observation.fail(error=f"后退失败: {e}", url=self._page.url)
 
     async def refresh(self) -> Observation:
         """刷新页面"""
+        logger.info("🔄 refresh")
+        start = time.time()
         try:
             await self._page.reload(wait_until="load")
+            elapsed = time.time() - start
+            logger.info("✅ refresh 完成 | {:.1f}s", elapsed)
             return Observation.ok(
                 url=self._page.url,
                 title=await self._page.title(),
                 page_changed=True,
             )
         except Exception as e:
+            logger.error("❌ refresh 失败: {}", e)
             return Observation.fail(error=f"刷新失败: {e}", url=self._page.url)
 
     async def screenshot(self, full_page: bool = True) -> Observation:
         """截取页面截图"""
+        logger.info("📸 screenshot | full_page={}", full_page)
+        start = time.time()
         try:
             screenshot_bytes = await self._page.screenshot(full_page=full_page)
             import base64
             b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+            elapsed = time.time() - start
+            logger.info("✅ screenshot 完成 | {} bytes | {:.1f}s",
+                        len(screenshot_bytes), elapsed)
             return Observation.ok(
                 url=self._page.url,
                 title=await self._page.title(),
                 data={"screenshot_base64": b64},
             )
         except Exception as e:
+            logger.error("❌ screenshot 失败: {}", e)
             return Observation.fail(error=f"截图失败: {e}", url=self._page.url)
 
     # ── 辅助方法 ────────────────────────────────────────────────────
@@ -275,21 +342,32 @@ class BrowserManager:
         self._browser = None
         self._context = None
         self._page: Optional[Page] = None
+        logger.debug("BrowserManager 创建 | headless={}", headless)
 
     async def start(self):
         """启动浏览器"""
-        self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(
-            headless=self._headless,
-        )
-        self._context = await self._browser.new_context(
-            viewport={"width": 1280, "height": 720},
-            locale="zh-CN",
-        )
-        self._page = await self._context.new_page()
+        logger.info("🚀 启动浏览器 | headless={}", self._headless)
+        start = time.time()
+        try:
+            self._playwright = await async_playwright().start()
+            self._browser = await self._playwright.chromium.launch(
+                headless=self._headless,
+            )
+            self._context = await self._browser.new_context(
+                viewport={"width": 1280, "height": 720},
+                locale="zh-CN",
+            )
+            self._page = await self._context.new_page()
+            elapsed = time.time() - start
+            logger.info("✅ 浏览器启动完成 | {:.1f}s", elapsed)
+        except Exception as e:
+            elapsed = time.time() - start
+            logger.error("❌ 浏览器启动失败 | {:.1f}s | 错误: {}", elapsed, e)
+            raise
 
     async def stop(self):
         """关闭浏览器"""
+        logger.info("🛑 关闭浏览器...")
         if self._page:
             await self._page.close()
         if self._context:
@@ -298,6 +376,7 @@ class BrowserManager:
             await self._browser.close()
         if self._playwright:
             await self._playwright.stop()
+        logger.info("✅ 浏览器已关闭")
 
     @property
     def page(self) -> Page:
