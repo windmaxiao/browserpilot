@@ -336,13 +336,14 @@ class BrowserTool:
 class BrowserManager:
     """管理 Playwright 浏览器实例的生命周期。"""
 
-    def __init__(self, headless: bool = True):
+    def __init__(self, headless: bool = True, slow_mo: int = 50):
         self._headless = headless
+        self._slow_mo = slow_mo
         self._playwright: Optional[Playwright] = None
         self._browser = None
         self._context = None
         self._page: Optional[Page] = None
-        logger.debug("BrowserManager 创建 | headless={}", headless)
+        logger.debug("BrowserManager 创建 | headless={} slow_mo={}", headless, slow_mo)
 
     async def start(self):
         """启动浏览器"""
@@ -350,13 +351,34 @@ class BrowserManager:
         start = time.time()
         try:
             self._playwright = await async_playwright().start()
+
+            # 参考 rpa_core 的反检测启动参数
+            launch_args = [
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+                "--disable-gpu",
+            ]
+            if not self._headless:
+                launch_args.append("--start-maximized")
+
             self._browser = await self._playwright.chromium.launch(
                 headless=self._headless,
+                args=launch_args,
+                slow_mo=self._slow_mo,
             )
-            self._context = await self._browser.new_context(
-                viewport={"width": 1280, "height": 720},
-                locale="zh-CN",
-            )
+
+            if not self._headless:
+                self._context = await self._browser.new_context(
+                    no_viewport=True,
+                    locale="zh-CN",
+                )
+            else:
+                self._context = await self._browser.new_context(
+                    viewport={"width": 1280, "height": 720},
+                    locale="zh-CN",
+                )
+
             self._page = await self._context.new_page()
             elapsed = time.time() - start
             logger.info("✅ 浏览器启动完成 | {:.1f}s", elapsed)

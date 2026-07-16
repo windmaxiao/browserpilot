@@ -37,9 +37,40 @@ Playwright
 3. **Observation** — 执行结果统一返回格式
 4. **Action Schema** — Agent 输出的标准动作格式
 
+### BrowserManager 配置
+
+```python
+from agent.browser.playwright import BrowserManager
+
+# 有头模式（默认，适合调试和需要反检测的场景）
+manager = BrowserManager(headless=False, slow_mo=50)
+
+# 无头模式（适合服务器部署）
+manager = BrowserManager(headless=True)
+```
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `headless` | `False` | 是否无头模式。`False` 时自动启用最大化窗口 + `no_viewport` |
+| `slow_mo` | `50` | 操作间延迟（毫秒），模拟人类操作速度；`0` 可关闭 |
+
+#### 反检测
+
+`BrowserManager.start()` 自动应用以下 Chromium 启动参数：
+
+| 参数 | 作用 |
+|------|------|
+| `--disable-blink-features=AutomationControlled` | 隐藏 `navigator.webdriver` 等自动化标记 |
+| `--disable-dev-shm-usage` | 避免 Linux `/dev/shm` 不足导致崩溃 |
+| `--no-sandbox` | 沙箱兼容性 |
+| `--disable-gpu` | 减少 GPU 指纹特征 |
+| `--start-maximized` | 非 headless 时窗口最大化 |
+
+非 headless 模式下自动设置 `no_viewport=True`，使用真实屏幕尺寸而非固定视口。
+
 ### 目录结构
 
-```
+```text
 agent-rpa/
 ├── agent/
 │   ├── core/
@@ -62,7 +93,7 @@ agent-rpa/
 │   └── tools/              # (预留) 辅助工具
 │
 ├── examples/
-│   ├── manual_demo.py      # 手动模式 Demo
+│   ├── manual_demo.py      # 手动模式 Demo —— 完整 RPA 流程（百度搜索+结果保存）
 │   └── agent_demo.py       # Agent 模式 Demo
 │
 └── tests/
@@ -81,12 +112,27 @@ pip install -e .
 # 安装 Playwright 浏览器
 playwright install chromium
 
-# 运行 Demo
+# 运行 Demo（手动模式：百度搜索"北京时间"，保存结果页面）
 python examples/manual_demo.py
 
 # 运行测试
 pytest
 ```
+
+## demo 功能说明
+
+### manual_demo.py — 百度搜索 RPA 流程
+
+演示 Browser Tool 的完整 RPA 流程，参考 `rpa_core` 框架的 `demo1.py`：
+
+1. 打开百度首页
+2. 自动检测页面版本（AI 版 `#chat-textarea` / 经典版 `#kw`）
+3. 输入搜索词"北京时间"并搜索
+4. 获取搜索结果第一条链接的文本
+5. 点击链接（自动识别新标签页并切换）
+6. 获取新页面的 URL、标题、HTML 内容
+7. 将 HTML 保存到 `结果/{时间戳}/正文.html`
+8. 关闭浏览器
 
 ## 开发路线
 
