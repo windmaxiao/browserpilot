@@ -336,14 +336,22 @@ class BrowserTool:
 class BrowserManager:
     """管理 Playwright 浏览器实例的生命周期。"""
 
-    def __init__(self, headless: bool = True, slow_mo: int = 50):
+    def __init__(self, headless: bool = True, slow_mo: int = 50, **launch_kwargs):
+        """参数:
+            headless: 是否启用无头模式
+            slow_mo: 操作间延迟（毫秒），模拟人类操作速度
+            **launch_kwargs: 传递给 playwright.chromium.launch 的额外参数
+                           （如 channel, executable_path, proxy 等）
+        """
         self._headless = headless
         self._slow_mo = slow_mo
+        self._launch_kwargs = launch_kwargs
         self._playwright: Optional[Playwright] = None
         self._browser = None
         self._context = None
         self._page: Optional[Page] = None
-        logger.debug("BrowserManager 创建 | headless={} slow_mo={}", headless, slow_mo)
+        logger.debug("BrowserManager 创建 | headless={} slow_mo={} kwargs={}",
+                     headless, slow_mo, launch_kwargs)
 
     async def start(self):
         """启动浏览器"""
@@ -353,20 +361,39 @@ class BrowserManager:
             self._playwright = await async_playwright().start()
 
             # 参考 rpa_core 的反检测启动参数
-            launch_args = [
+            _default_args = [
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
                 "--no-sandbox",
                 "--disable-gpu",
             ]
+            # 合并用户自定义 args（去重）
+            _user_args = self._launch_kwargs.get("args", [])
+            launch_args = list(_default_args)
+            for a in _user_args:
+                if a not in launch_args:
+                    launch_args.append(a)
+
             if not self._headless:
                 launch_args.append("--start-maximized")
 
-            self._browser = await self._playwright.chromium.launch(
-                headless=self._headless,
-                args=launch_args,
-                slow_mo=self._slow_mo,
-            )
+            # 构建 launch 选项
+            launch_options = {
+                "headless": self._headless,
+                "slow_mo": self._slow_mo,
+                "args": launch_args,
+            }
+
+            # 优先使用 executable_path，其次 channel，否则用 Playwright 内置 Chromium
+            if self._launch_kwargs.get("executable_path"):
+                launch_options["executable_path"] = self._launch_kwargs["executable_path"]
+            elif self._launch_kwargs.get("channel"):
+                launch_options["channel"] = self._launch_kwargs["channel"]
+
+            if self._launch_kwargs.get("proxy"):
+                launch_options["proxy"] = self._launch_kwargs["proxy"]
+
+            self._browser = await self._playwright.chromium.launch(**launch_options)
 
             if not self._headless:
                 self._context = await self._browser.new_context(

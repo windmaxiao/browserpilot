@@ -47,12 +47,28 @@ manager = BrowserManager(headless=False, slow_mo=50)
 
 # 无头模式（适合服务器部署）
 manager = BrowserManager(headless=True)
+
+# 使用系统安装的 Chrome（而非 Playwright 内置 Chromium）
+manager = BrowserManager(channel="chrome")
+
+# 指定浏览器可执行文件路径
+manager = BrowserManager(executable_path="C:/Program Files/Google/Chrome/Application/chrome.exe")
 ```
 
 | 参数 | 默认值 | 说明 |
-|------|--------|------|
+| :--- | :--- | :--- |
 | `headless` | `False` | 是否无头模式。`False` 时自动启用最大化窗口 + `no_viewport` |
 | `slow_mo` | `50` | 操作间延迟（毫秒），模拟人类操作速度；`0` 可关闭 |
+| `channel` | — | 使用系统安装的浏览器：`"chrome"`、`"msedge"`、`"chrome-beta"` 等 |
+| `executable_path` | — | 指定浏览器可执行文件路径（优先级高于 `channel`） |
+| `proxy` | — | 代理配置，如 `{"server": "http://proxy:8080"}` |
+| `**kwargs` | — | 其余参数透传给 `playwright.chromium.launch()` |
+
+三种浏览器选择策略（优先级从高到低）：
+
+1. **`executable_path`** — 指定路径的浏览器
+2. **`channel`** — 系统安装的 Chrome/Edge 等
+3. **不指定** — 使用 Playwright 内置 Chromium（版本完全匹配，最稳定）
 
 #### 反检测
 
