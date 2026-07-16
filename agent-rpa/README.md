@@ -75,7 +75,7 @@ manager = BrowserManager(executable_path="C:/Program Files/Google/Chrome/Applica
 `BrowserManager.start()` 自动应用以下 Chromium 启动参数：
 
 | 参数 | 作用 |
-|------|------|
+| :--- | :--- |
 | `--disable-blink-features=AutomationControlled` | 隐藏 `navigator.webdriver` 等自动化标记 |
 | `--disable-dev-shm-usage` | 避免 Linux `/dev/shm` 不足导致崩溃 |
 | `--no-sandbox` | 沙箱兼容性 |
@@ -139,7 +139,7 @@ pytest
 
 ### manual_demo.py — 百度搜索 RPA 流程
 
-演示 Browser Tool 的完整 RPA 流程，参考 `rpa_core` 框架的 `demo1.py`：
+演示 Browser Tool 的完整 RPA 流程：
 
 1. 打开百度首页
 2. 自动检测页面版本（AI 版 `#chat-textarea` / 经典版 `#kw`）
@@ -153,7 +153,7 @@ pytest
 ## 开发路线
 
 | 版本 | 目标 |
-|------|------|
+| :--- | :--- |
 | V0.1 | 执行层：Browser Tool + Snapshot + Observation + Schema |
 | V0.2 | Agent Loop：规则驱动 Planner |
 | V0.3 | 接入 LLM：LLM Planner |

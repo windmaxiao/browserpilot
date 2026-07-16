@@ -360,7 +360,7 @@ class BrowserManager:
         try:
             self._playwright = await async_playwright().start()
 
-            # 参考 rpa_core 的反检测启动参数
+            # 浏览器稳定性与反检测参数
             _default_args = [
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
