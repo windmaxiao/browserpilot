@@ -94,16 +94,17 @@ class BrowserTool:
             locator = self._page.locator(selector)
             await locator.wait_for(state="visible", timeout=timeout)
             old_url = self._page.url
+            old_title = await self._page.title()
             await locator.click(force=force, timeout=timeout)
             await self._smart_wait()
             new_url = self._page.url
             new_title = await self._page.title()
             elapsed = time.time() - start
-            changed = new_url != old_url
+            changed = (new_url != old_url) or (new_title != old_title)
             if changed:
-                logger.info("✅ click 完成 | 发生跳转 → {} | {:.1f}s", new_url, elapsed)
+                logger.info("✅ click 完成 | 页面变化 | {:.1f}s", elapsed)
             else:
-                logger.info("✅ click 完成 | 页面无跳转 | {:.1f}s", elapsed)
+                logger.info("✅ click 完成 | 页面无变化 | {:.1f}s", elapsed)
             return Observation.ok(
                 url=new_url,
                 title=new_title,
@@ -156,14 +157,16 @@ class BrowserTool:
             locator = self._page.locator(selector)
             await locator.wait_for(state="visible", timeout=timeout)
             old_url = self._page.url
+            old_title = await self._page.title()
             await locator.select_option(value)
             new_url = self._page.url
+            new_title = await self._page.title()
             elapsed = time.time() - start
             logger.info("✅ select 完成 | {} | {:.1f}s", selector, elapsed)
             return Observation.ok(
                 url=new_url,
-                title=await self._page.title(),
-                page_changed=(new_url != old_url),
+                title=new_title,
+                page_changed=(new_url != old_url) or (new_title != old_title),
             )
         except Exception as e:
             elapsed = time.time() - start

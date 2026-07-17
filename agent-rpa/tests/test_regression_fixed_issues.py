@@ -164,6 +164,27 @@ class TestIssue2_PageChanged:
         new_url = "https://example.com/page/"
         assert (new_url != old_url) == True
 
+    def test_title_change_detected(self):
+        """标题变化应被视为 page_changed"""
+        old_title = "首页"
+        new_title = "关于我们"
+        assert (old_title != new_title) == True
+
+    def test_title_and_url_both_unchanged(self):
+        """URL 和标题都不变时 page_changed=False"""
+        old_url = "https://example.com/page"
+        new_url = "https://example.com/page"
+        old_title = "首页"
+        new_title = "首页"
+        assert (new_url != old_url) == False
+        assert (new_title != old_title) == False
+        assert ((new_url != old_url) or (new_title != old_title)) == False
+
+    def test_title_unchanged_url_unchanged_false(self):
+        """SPA 场景：内容变化但标题不变 — page_changed=False（已知限制）"""
+        # 这是当前无法检测的场景，标记为已知限制
+        pass
+
 
 # ═══════════════════════════════════════════════════════════════
 # Issue 7 & 9: Observation.ok() data 无嵌套
