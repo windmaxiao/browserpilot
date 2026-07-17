@@ -152,6 +152,16 @@ class SnapshotGenerator:
 
             aria_label = await el.get_attribute("aria-label") or ""
 
+            # 提取重要 HTML 属性到 attributes 字典
+            attributes: dict[str, str] = {}
+            for attr in ("data-testid", "role", "type", "href", "src", "alt"):
+                try:
+                    val = await el.get_attribute(attr)
+                    if val:
+                        attributes[attr] = val
+                except Exception:
+                    pass
+
             # 生成选择器
             selector = await self._build_selector(el, tag, text)
 
@@ -177,6 +187,7 @@ class SnapshotGenerator:
                 selector=selector,
                 bbox=bbox,
                 aria_label=aria_label,
+                attributes=attributes,
                 index=index,
             )
         except Exception:
