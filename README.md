@@ -55,8 +55,8 @@ Playwright
 ```bash
 cd agent-rpa
 
-# 安装依赖
-pip install -e .
+# 安装依赖（含 dev 依赖以运行测试）
+pip install -e ".[dev]"
 
 # 安装 Playwright 浏览器
 playwright install chromium
