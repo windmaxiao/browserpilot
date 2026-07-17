@@ -54,6 +54,13 @@ class Action:
     可以是文字、aria-label、位置描述等语义化信息。
     """
 
+    target_id: Optional[str] = None
+    """
+    目标元素的 element_id（从 Snapshot 获取）。
+    设置此字段后应同时设置 params["selector"] 以提供精确定位。
+    优先级高于 target。
+    """
+
     value: Optional[str] = None
     """
     动作参数值。
@@ -85,6 +92,14 @@ class Action:
 
         if self.action == "input" and self.value is None:
             errors.append("input 动作需要提供 value (输入文本)")
+
+        # 验证 target_id 格式（如果设置）
+        if self.target_id is not None:
+            if not self.target_id.startswith("e") or not self.target_id[1:].isdigit():
+                errors.append(
+                    f"target_id 格式无效: '{self.target_id}'"
+                    "（应为 'e' 开头后跟数字，如 e0、e1）"
+                )
 
         return errors
 

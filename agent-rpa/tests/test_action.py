@@ -20,6 +20,25 @@ def test_action_creation():
     assert a.action == "click"
     assert a.target == "登录按钮"
     assert a.value is None
+    assert a.target_id is None  # 默认无 target_id
+
+
+def test_action_with_target_id():
+    """测试带 target_id 的 Action 创建"""
+    a = Action(
+        action="click",
+        target="登录按钮",
+        target_id="e0",
+        params={"selector": "button:has-text(\"登录\")"},
+    )
+    assert a.target_id == "e0"
+    assert a.params["selector"] == 'button:has-text("登录")'
+    assert a.is_valid()
+
+    # 非法 target_id 格式
+    a = Action(action="click", target_id="invalid")
+    assert not a.is_valid()
+    assert "target_id 格式无效" in a.validate()[0]
 
 
 def test_action_validation():

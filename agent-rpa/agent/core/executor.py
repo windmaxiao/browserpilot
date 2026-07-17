@@ -13,6 +13,16 @@ from agent.browser.playwright import BrowserTool
 from agent.schema.action import Action
 from agent.schema.observation import Observation
 
+# 已知 HTML 标签名集合（_resolve_selector 用于判断纯标签选择器）
+_HTML_TAGS = frozenset({
+    "input", "button", "a", "select", "textarea",
+    "div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6",
+    "label", "li", "ul", "ol", "table", "tr", "td", "th",
+    "form", "img", "nav", "header", "footer", "section",
+    "article", "main", "aside", "iframe", "video", "audio",
+    "canvas", "figure", "figcaption", "dl", "dt", "dd",
+})
+
 
 class Executor:
     """
@@ -176,13 +186,18 @@ class Executor:
 
         优先级：
         1. params 中显式指定的 selector
-        2. 语义化文本匹配
+        2. CSS 选择器前缀 (# . [ :)
+        3. 纯 HTML 标签名（如 input、button）
+        4. 语义化文本匹配 fallback → :has-text("")
         """
         explicit = params.get("selector")
         if explicit:
             return explicit
 
         if target.startswith(("#", ".", "[", ":")):
+            return target
+
+        if target in _HTML_TAGS:
             return target
 
         safe = target.replace('"', '\\"')

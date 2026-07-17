@@ -21,6 +21,9 @@ class ElementInfo:
     text: str
     """元素的可见文本"""
 
+    element_id: str = ""
+    """全局唯一元素 ID（由 SnapshotGenerator 自动分配，格式 e0, e1, ...）"""
+
     tag: str = ""
     """HTML 标签名，如 button、a、input"""
 

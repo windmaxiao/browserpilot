@@ -30,6 +30,7 @@ class SnapshotGenerator:
 
     def __init__(self, page: Page):
         self._page = page
+        self._element_counter = 0
         logger.debug("SnapshotGenerator 创建")
 
     async def generate(self) -> Snapshot:
@@ -164,8 +165,13 @@ class SnapshotGenerator:
             except Exception:
                 pass
 
+            # 分配全局唯一元素 ID
+            self._element_counter += 1
+            element_id = f"e{self._element_counter}"
+
             return ElementInfo(
                 text=text[:200],
+                element_id=element_id,
                 tag=tag,
                 element_type=self._infer_type(tag),
                 selector=selector,
