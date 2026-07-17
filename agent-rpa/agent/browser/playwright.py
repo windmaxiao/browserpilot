@@ -319,13 +319,13 @@ class BrowserTool:
     # ── 辅助方法 ────────────────────────────────────────────────────
 
     async def _smart_wait(self):
-        """智能等待页面稳定"""
+        """智能等待页面稳定
+
+        Playwright 的 click() 已内置导航等待（no_wait_after=False），
+        此方法作为轻量安全垫，仅需等待 DOM 加载完成即可。
+        """
         try:
-            await self._page.wait_for_load_state("networkidle", timeout=5000)
-        except Exception:
-            pass
-        try:
-            await self._page.wait_for_load_state("domcontentloaded", timeout=3000)
+            await self._page.wait_for_load_state("load", timeout=3000)
         except Exception:
             pass
 
