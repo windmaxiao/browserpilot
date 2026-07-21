@@ -143,6 +143,13 @@ class SnapshotGenerator:
             if tag in self.EXCLUDE_TAGS:
                 return None
 
+            # 跳过不可见元素（避免 Agent 规划到无法操作的控件）
+            try:
+                if not await el.is_visible():
+                    return None
+            except Exception:
+                pass
+
             text = (await el.inner_text()).strip()
             if not text:
                 text = (await el.get_attribute("value")) or ""

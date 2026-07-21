@@ -65,12 +65,14 @@ async def test_snapshot_generator_element_id():
 
     mock_btn = AsyncMock()
     mock_btn.evaluate = AsyncMock(return_value="button")
+    mock_btn.is_visible = AsyncMock(return_value=True)
     mock_btn.inner_text = AsyncMock(return_value="登录")
     mock_btn.get_attribute = AsyncMock(return_value="")
     mock_btn.bounding_box = AsyncMock(return_value=None)
 
     mock_input = AsyncMock()
     mock_input.evaluate = AsyncMock(return_value="input")
+    mock_input.is_visible = AsyncMock(return_value=True)
     mock_input.inner_text = AsyncMock(return_value="")
     mock_input.get_attribute = AsyncMock(side_effect=lambda attr: {
         "placeholder": "请输入用户名",
@@ -104,3 +106,38 @@ async def test_snapshot_generator_element_id():
 
     # 验证全局唯一（不同类型的元素也不同 ID）
     assert btn.element_id != inp.element_id
+
+
+@pytest.mark.asyncio
+async def test_snapshot_generator_filters_invisible():
+    """验证 SnapshotGenerator 过滤不可见元素"""
+    mock_page = AsyncMock()
+
+    visible_btn = AsyncMock()
+    visible_btn.evaluate = AsyncMock(return_value="button")
+    visible_btn.is_visible = AsyncMock(return_value=True)
+    visible_btn.inner_text = AsyncMock(return_value="可见按钮")
+    visible_btn.get_attribute = AsyncMock(return_value="")
+    visible_btn.bounding_box = AsyncMock(return_value=None)
+
+    invisible_btn = AsyncMock()
+    invisible_btn.evaluate = AsyncMock(return_value="button")
+    invisible_btn.is_visible = AsyncMock(return_value=False)
+    invisible_btn.inner_text = AsyncMock(return_value="隐藏按钮")
+    invisible_btn.get_attribute = AsyncMock(return_value="")
+    invisible_btn.bounding_box = AsyncMock(return_value=None)
+
+    mock_page.query_selector_all = AsyncMock(side_effect=[
+        [visible_btn, invisible_btn],  # buttons: 一个可见一个隐藏
+        [],  # inputs
+        [],  # links
+        [],  # texts
+        [],  # selects
+    ])
+
+    sg = SnapshotGenerator(mock_page)
+    snapshot = await sg.generate()
+
+    assert len(snapshot.buttons) == 1
+    assert snapshot.buttons[0].text == "可见按钮"
+    assert not any(b.text == "隐藏按钮" for b in snapshot.buttons)
