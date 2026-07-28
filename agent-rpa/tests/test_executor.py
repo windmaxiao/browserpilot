@@ -106,3 +106,166 @@ class TestResolveSelector:
         assert selector == 'button:has-text("登录")'
         assert action.target_id == "e0"
         assert action.is_valid()
+
+
+# ── target_id 解析测试 ──────────────────────────────────────────
+
+class TestTargetIdResolution:
+    """Executor 通过 target_id 从 Snapshot 解析选择器的逻辑"""
+
+    def _make_snapshot_with_elements(self):
+        """创建一个包含已知 element_id 的 mock Snapshot"""
+        from unittest.mock import MagicMock
+
+        snap = MagicMock()
+        el0 = MagicMock(element_id="e0", selector="button:has-text(\"登录\")")
+        el1 = MagicMock(element_id="e1", selector="#username")
+        el2 = MagicMock(element_id="e2", selector="select#city")
+        snap.get_interactive_elements.return_value = [el0, el1, el2]
+        return snap
+
+    def test_build_element_map(self):
+        """_build_element_map 正确构建 element_id → selector 映射"""
+        exec = Executor(MagicMock())
+        snap = self._make_snapshot_with_elements()
+        mapping = exec._build_element_map(snap)
+
+        assert len(mapping) == 3
+        assert mapping["e0"] == 'button:has-text("登录")'
+        assert mapping["e1"] == "#username"
+        assert mapping["e2"] == "select#city"
+
+    def test_resolve_target_by_id(self):
+        """target_id 从 element_map 正确解析出 selector"""
+        exec = Executor(MagicMock())
+        exec._element_map = {"e0": 'button:has-text("登录")'}
+
+        action = Action(action="click", target_id="e0")
+        selector = exec._resolve_target(action)
+        assert selector == 'button:has-text("登录")'
+
+    def test_resolve_target_params_selector_highest_priority(self):
+        """params.selector 优先级高于 target_id"""
+        exec = Executor(MagicMock())
+        exec._element_map = {"e0": 'button:has-text("旧按钮")'}
+
+        action = Action(
+            action="click",
+            target_id="e0",
+            params={"selector": 'button:has-text("新按钮")'},
+        )
+        selector = exec._resolve_target(action)
+        # 应返回 params.selector 而非从 element_map 解析
+        assert selector == 'button:has-text("新按钮")'
+
+    def test_resolve_target_id_priority_over_target(self):
+        """target_id 优先级高于 target"""
+        exec = Executor(MagicMock())
+        exec._element_map = {"e0": "#exact-btn"}
+
+        action = Action(
+            action="click",
+            target="模糊描述",
+            target_id="e0",
+        )
+        selector = exec._resolve_target(action)
+        # 应返回 target_id 解析结果
+        assert selector == "#exact-btn"
+
+    def test_resolve_target_target_fallback(self):
+        """无 target_id 时使用 target 语义解析"""
+        exec = Executor(MagicMock())
+        exec._element_map = {}
+
+        action = Action(action="click", target="登录按钮")
+        selector = exec._resolve_target(action)
+        assert selector == ':has-text("登录按钮")'
+
+    def test_resolve_target_not_found_returns_none(self):
+        """target_id 在 element_map 中不存在时返回 None"""
+        exec = Executor(MagicMock())
+        exec._element_map = {"e0": "#btn"}
+
+        action = Action(action="click", target_id="e999")
+        selector = exec._resolve_target(action)
+        assert selector is None
+
+    def test_resolve_target_no_target_no_target_id(self):
+        """既无 target 也无 target_id 时返回 None"""
+        exec = Executor(MagicMock())
+        action = Action(action="click")
+        selector = exec._resolve_target(action)
+        assert selector is None
+
+    @pytest.mark.asyncio
+    async def test_execute_click_with_target_id(self):
+        """通过 target_id 执行 click"""
+        tool = MagicMock()
+        tool.click = AsyncMock(return_value=Observation.ok(page_changed=True))
+        tool.current_url = "https://example.com"
+        tool.current_title = AsyncMock(return_value="Example")
+
+        exec = Executor(tool)
+        snap = self._make_snapshot_with_elements()
+
+        action = Action(action="click", target_id="e0")
+        obs = await exec.execute(action, snapshot=snap)
+
+        assert obs.success is True
+        tool.click.assert_awaited_once_with(
+            'button:has-text("登录")',
+            timeout=5000,
+            force=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_input_with_target_id(self):
+        """通过 target_id 执行 input"""
+        tool = MagicMock()
+        tool.input = AsyncMock(return_value=Observation.ok())
+        tool.current_url = "https://example.com"
+        tool.current_title = AsyncMock(return_value="Example")
+
+        exec = Executor(tool)
+        snap = self._make_snapshot_with_elements()
+
+        action = Action(action="input", target_id="e1", value="hello")
+        obs = await exec.execute(action, snapshot=snap)
+
+        assert obs.success is True
+        tool.input.assert_awaited_once_with(
+            "#username",
+            "hello",
+            timeout=5000,
+            clear_first=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_with_stale_target_id(self):
+        """target_id 在 Snapshot 中不存在时返回 fail"""
+        tool = MagicMock()
+        exec = Executor(tool)
+        snap = self._make_snapshot_with_elements()
+
+        action = Action(action="click", target_id="e999")
+        obs = await exec.execute(action, snapshot=snap)
+
+        assert obs.is_error is True
+        assert "未找到" in obs.error
+        assert "e999" in obs.error
+
+    @pytest.mark.asyncio
+    async def test_execute_without_snapshot_uses_target_fallback(self):
+        """不传 snapshot 时仍能通过 target 正常执行"""
+        tool = MagicMock()
+        tool.click = AsyncMock(return_value=Observation.ok(page_changed=True))
+        exec = Executor(tool)
+
+        action = Action(action="click", target="登录按钮")
+        obs = await exec.execute(action)  # 不传 snapshot
+
+        assert obs.success is True
+        tool.click.assert_awaited_once()
+        # 验证使用了 :has-text() fallback
+        args, _ = tool.click.call_args
+        assert 'has-text' in args[0] or ':' in args[0]

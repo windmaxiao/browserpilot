@@ -119,8 +119,10 @@ class Agent:
             log_action = f"{action.action}({action.target})"
             if action.value:
                 log_action += f" = {action.value[:50]}"
+            if action.target_id:
+                log_action += f" [{action.target_id}]"
             logger.info("⚡ [Step {}] 执行: {}", self._current_step, log_action)
-            observation = await self._executor.execute(action)
+            observation = await self._executor.execute(action, snapshot=snapshot)
 
             # 5. Record history
             self._history.append({

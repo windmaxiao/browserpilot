@@ -61,6 +61,34 @@ def test_action_validation():
     assert not a.is_valid()
 
 
+def test_actions_require_target_or_target_id():
+    """需要目标元素的动作必须提供 target 或 target_id"""
+    needs_target = ["click", "select", "download", "upload"]
+
+    for action_type in needs_target:
+        # 没有 target 也没有 target_id → 非法
+        a = Action(action=action_type)
+        assert not a.is_valid()
+        assert "target" in a.validate()[0].lower()
+
+        # 只提供 target_id → 合法
+        a = Action(action=action_type, target_id="e0")
+        assert a.is_valid(), f"{action_type} + target_id 应合法, 错误: {a.validate()}"
+
+    # input: value 优先校验，无 value 时报 value 错误而非 target 错误
+    a = Action(action="input")
+    assert not a.is_valid()
+    assert "value" in a.validate()[0].lower()
+
+    # input + target_id + value → 合法
+    a = Action(action="input", target_id="e0", value="test")
+    assert a.is_valid(), f"input + target_id + value 应合法, 错误: {a.validate()}"
+
+    # goto 不受 target/target_id 影响
+    a = Action(action="goto", target_id="e0")
+    assert not a.is_valid()  # goto 仍需要 value
+
+
 def test_factory_functions():
     """测试工厂函数"""
     a = click("登录", params={"timeout": 3000})

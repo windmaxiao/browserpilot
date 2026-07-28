@@ -57,8 +57,9 @@ class Action:
     target_id: Optional[str] = None
     """
     目标元素的 element_id（从 Snapshot 获取）。
-    设置此字段后应同时设置 params["selector"] 以提供精确定位。
-    优先级高于 target。
+    用于精确定位，优先级高于 target。
+    设置此字段后无需再设置 target 或 params["selector"]，
+    Executor 会自动从 Snapshot 映射中查找选择器。
     """
 
     value: Optional[str] = None
@@ -92,6 +93,13 @@ class Action:
 
         if self.action == "input" and self.value is None:
             errors.append("input 动作需要提供 value (输入文本)")
+
+        # 需要目标元素的动作：必须提供 target 或 target_id
+        needs_target = {"click", "select", "download", "upload", "input"}
+        if self.action in needs_target and not self.target and not self.target_id:
+            errors.append(
+                f"{self.action} 动作需要提供 target 或 target_id"
+            )
 
         # 验证 target_id 格式（如果设置）
         if self.target_id is not None:
