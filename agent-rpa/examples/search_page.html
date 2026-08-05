@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>测试搜索页</title>
+  <style>
+    body { font-family: sans-serif; margin: 40px; }
+    #results { margin-top: 20px; display: none; }
+    a { display: block; margin: 8px 0; color: #0645ad; }
+  </style>
+</head>
+<body>
+  <h1>测试搜索页</h1>
+  <input id="search-box" type="text" placeholder="请输入搜索关键词">
+  <button id="search-btn">搜索</button>
+  <div id="results">
+    <p>已找到关于 <span id="kw"></span> 的结果：</p>
+    <a href="#" id="result-link">北京时间（中国国家标准时间）</a>
+  </div>
+  <script>
+    document.getElementById('search-btn').addEventListener('click', function () {
+      var kw = document.getElementById('search-box').value || '北京时间';
+      document.getElementById('kw').textContent = kw;
+      document.getElementById('results').style.display = 'block';
+    });
+  </script>
+</body>
+</html>

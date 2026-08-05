@@ -77,6 +77,7 @@ class SnapshotGenerator:
             info = await self._extract_element_info(el, i)
             if info and info.text.strip():
                 result.append(info)
+        self._disambiguate_selectors(result)
         return result
 
     async def _extract_inputs(self) -> list[ElementInfo]:
@@ -94,6 +95,7 @@ class SnapshotGenerator:
                 except Exception:
                     pass
                 result.append(info)
+        self._disambiguate_selectors(result)
         return result
 
     async def _extract_links(self) -> list[ElementInfo]:
@@ -110,6 +112,7 @@ class SnapshotGenerator:
                     pass
                 info.attributes["href"] = href
                 result.append(info)
+        self._disambiguate_selectors(result)
         return result
 
     async def _extract_texts(self) -> list[ElementInfo]:
@@ -132,6 +135,7 @@ class SnapshotGenerator:
             info = await self._extract_element_info(el, i)
             if info:
                 result.append(info)
+        self._disambiguate_selectors(result)
         return result
 
     async def _extract_element_info(
@@ -243,6 +247,32 @@ class SnapshotGenerator:
             return f'{tag}:has-text("{safe_text[:50]}")'
 
         return tag
+
+    @staticmethod
+    def _disambiguate_selectors(elements: list[ElementInfo]) -> None:
+        """保证交互元素定位唯一（V0.2 增强）。
+
+        问题：页面可能出现同文本/同 id 的孪生元素（如百度 AI 版的双「百度一下」按钮），
+        其中部分不可见。`_build_selector` 生成的选择器（如 `button:has-text("...")`）
+        会同时命中可见与不可见元素，导致 strict mode violation。
+
+        处理：
+        1. 统一追加 `:visible` —— 与提取时的 `is_visible()` 过滤保持一致，排除不可见孪生；
+        2. 同类目内选择器仍重复时，追加 `>> nth=j` 索引（按 DOM 提取顺序）精确定位。
+        """
+        counts: dict[str, int] = {}
+        for el in elements:
+            counts[el.selector] = counts.get(el.selector, 0) + 1
+
+        seen: dict[str, int] = {}
+        for el in elements:
+            visible_selector = f"{el.selector}:visible"
+            if counts[el.selector] > 1:
+                j = seen.get(el.selector, 0)
+                seen[el.selector] = j + 1
+                el.selector = f"{visible_selector} >> nth={j}"
+            else:
+                el.selector = visible_selector
 
     def _infer_type(self, tag: str) -> str:
         """从标签名推断元素类型"""

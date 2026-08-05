@@ -87,7 +87,13 @@ class BrowserTool:
         timeout: int = 5000,
         force: bool = False,
     ) -> Observation:
-        """点击元素"""
+        """点击元素
+
+        page_changed 判定（V0.2 增强）：
+        - URL 变化
+        - 标题变化
+        - DOM 指纹变化（元素数 / 文本长度，捕获 SPA 等无导航内容变化）
+        """
         logger.info("🖱️ click: {}", selector)
         start = time.time()
         try:
@@ -95,12 +101,18 @@ class BrowserTool:
             await locator.wait_for(state="visible", timeout=timeout)
             old_url = self._page.url
             old_title = await self._page.title()
+            old_fp = await self._page_fingerprint()
             await locator.click(force=force, timeout=timeout)
             await self._smart_wait()
             new_url = self._page.url
             new_title = await self._page.title()
+            new_fp = await self._page_fingerprint()
             elapsed = time.time() - start
-            changed = (new_url != old_url) or (new_title != old_title)
+            changed = (
+                (new_url != old_url)
+                or (new_title != old_title)
+                or (old_fp != new_fp)
+            )
             if changed:
                 logger.info("✅ click 完成 | 页面变化 | {:.1f}s", elapsed)
             else:
@@ -320,6 +332,28 @@ class BrowserTool:
             return Observation.fail(error=f"截图失败: {e}", url=self._page.url)
 
     # ── 辅助方法 ────────────────────────────────────────────────────
+
+    async def _page_fingerprint(self) -> dict:
+        """轻量 DOM 指纹，用于检测页面内容变化（SPA 等无导航场景）。
+
+        返回 {"elements": 元素总数, "text_len": body 可见文本长度}，
+        任一项发生变化即视为页面内容发生变化。
+        注意：动态内容（时钟、轮播等）可能造成轻微误报，属已知取舍。
+        """
+        try:
+            data = await self._page.evaluate(
+                """() => {
+                    const body = document.body;
+                    return {
+                        elements: document.getElementsByTagName('*').length,
+                        text_len: body ? body.innerText.length : 0,
+                    };
+                }"""
+            )
+            return dict(data)
+        except Exception as e:
+            logger.debug("DOM 指纹获取失败: {}", e)
+            return {}
 
     async def _smart_wait(self):
         """智能等待页面稳定

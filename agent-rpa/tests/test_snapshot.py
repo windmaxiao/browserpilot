@@ -141,3 +141,53 @@ async def test_snapshot_generator_filters_invisible():
     assert len(snapshot.buttons) == 1
     assert snapshot.buttons[0].text == "可见按钮"
     assert not any(b.text == "隐藏按钮" for b in snapshot.buttons)
+
+
+@pytest.mark.asyncio
+async def test_disambiguate_selectors_adds_visible():
+    """交互元素选择器追加 :visible，排除不可见孪生元素"""
+    mock_page = AsyncMock()
+    btn = AsyncMock()
+    btn.evaluate = AsyncMock(return_value="button")
+    btn.is_visible = AsyncMock(return_value=True)
+    btn.inner_text = AsyncMock(return_value="百度一下")
+    btn.get_attribute = AsyncMock(return_value="")
+    btn.bounding_box = AsyncMock(return_value=None)
+
+    mock_page.query_selector_all = AsyncMock(side_effect=[
+        [btn],  # buttons
+        [], [], [], [],
+    ])
+
+    sg = SnapshotGenerator(mock_page)
+    snapshot = await sg.generate()
+
+    assert len(snapshot.buttons) == 1
+    assert snapshot.buttons[0].selector == 'button:has-text("百度一下"):visible'
+
+
+@pytest.mark.asyncio
+async def test_disambiguate_selectors_nth_for_duplicates():
+    """同文本可见孪生元素追加 nth 索引精确定位"""
+    mock_page = AsyncMock()
+
+    def make_btn():
+        b = AsyncMock()
+        b.evaluate = AsyncMock(return_value="button")
+        b.is_visible = AsyncMock(return_value=True)
+        b.inner_text = AsyncMock(return_value="确定")
+        b.get_attribute = AsyncMock(return_value="")
+        b.bounding_box = AsyncMock(return_value=None)
+        return b
+
+    mock_page.query_selector_all = AsyncMock(side_effect=[
+        [make_btn(), make_btn()],  # 两个同文本可见按钮
+        [], [], [], [],
+    ])
+
+    sg = SnapshotGenerator(mock_page)
+    snapshot = await sg.generate()
+
+    assert len(snapshot.buttons) == 2
+    assert snapshot.buttons[0].selector == 'button:has-text("确定"):visible >> nth=0'
+    assert snapshot.buttons[1].selector == 'button:has-text("确定"):visible >> nth=1'

@@ -68,7 +68,7 @@ python examples/manual_demo.py
 pytest
 ```
 
-> 详细文档见 [agent-rpa/README.md](agent-rpa/README.md)
+> 详细文档见 [agent-rpa/README.md](agent-rpa/README.md)，**使用指南见 [使用文档.md](使用文档.md)**
 
 ## 开发路线
 

@@ -317,48 +317,70 @@ class Observer:
 | `observe()` | 生成 Snapshot + 检测页面类型 |
 | `observe_simplified()` | 返回简化版 dict（供 LLM 提示词使用） |
 
-#### `planner.py` — Planner（骨架）
+#### `planner.py` — Planner（V0.2 规则驱动）
 
-| 类 | 说明 |
+| 类/函数 | 说明 |
 |----|------|
-| `Planner` | 基类，`plan()` 抛出 NotImplementedError（V0.1 占位） |
-| `RuleBasedPlanner` | 规则引擎骨架（V0.2 实现），`add_rule(condition, action_fn)` |
+| `parse_goal(goal)` | 从目标提取 URL / 搜索词 / 点击目标 / 等待条件 → TaskSpec |
+| `Planner` | 基类，`plan()` 抛出 NotImplementedError（供 V0.3 LLM Planner 继承） |
+| `RuleBasedPlanner` | 规则引擎（V0.2 完成）：8 条内置规则 + `add_rule()` 自定义规则优先 |
+
+**Goal 语法（parse_goal）：**
+
+| 写法 | 示例 | 提取 |
+|------|------|------|
+| 打开 URL | `打开 https://www.baidu.com` | `url` |
+| 搜索词 | `查找 X` / `搜索 X` / `查询 X`（单个词） | `search_keywords` |
+| 点击目标 | `点击 北京时间 - 百度百科`（遇到下个动词截断）/ `点击"登录"` | `target_texts` |
+| 等待加载 | `等待 页面加载完成` | `wait_loading` |
+| 等待文本 | `等待 结果出现` | `wait_texts` |
+
+**RuleBasedPlanner 内置规则优先级：**
+1. 完成判定 —— 无点击目标：已提交且页面出现关键词 / 纯导航到达 URL；有点击目标：**全部目标点击完成**才收工 → `done`
+2. 导航（目标含 URL 且未到达）→ `goto`
+3. 搜索输入（有搜索框）→ `input`
+4. 提交搜索（点击搜索按钮）→ `click`
+5. 等待条件（页面未加载完 / 等待文本未出现，最多重试 10 次）→ `wait`
+6. 点击目标（未点击过的目标文本，文本已归一化匹配）→ `click`
+7. 结果首条链接 → `click`
+8. 兜底等待（结果未渲染）→ `wait`
 
 ---
 
-## 五、当前状态 (V0.1)
+## 五、当前状态 (V0.2)
 
-### 已完成
+### 已完成（V0.1 + V0.2）
 
 - ✅ 12 种 Action 类型定义 + 工厂函数 + 参数验证
 - ✅ Observation 统一返回格式
-- ✅ Snapshot + ElementInfo 数据结构
+- ✅ Snapshot + ElementInfo 数据结构（含 element_id 全局定位）
 - ✅ BrowserTool 11 个 Playwright 操作封装
-- ✅ SnapshotGenerator 从页面提取语义信息
-- ✅ Executor Action→BrowserTool 翻译层
+- ✅ SnapshotGenerator 从页面提取语义信息（已过滤不可见元素）
+- ✅ Executor Action→BrowserTool 翻译层（支持 target_id 精确定位）
 - ✅ Observer SnapshotGenerator 包装
 - ✅ Agent 主循环框架 (Observe→Plan→Execute→Record)
-- ✅ Planner 骨架（V0.2 实现具体规则）
-- ✅ 4 个测试文件，覆盖 Schema 和 Executor
-- ✅ 2 个 Demo（手动模式 + Agent 模式）
+- ✅ **RuleBasedPlanner 规则引擎（V0.2）**：parse_goal 目标解析（URL/搜索词/点击目标/等待条件）+ 8 条内置规则
+- ✅ **click() page_changed 增强（V0.2）**：URL + 标题 + DOM 指纹三重判定
+- ✅ 6 个测试文件，144 个用例（Schema / Executor / Planner / BrowserTool）
+- ✅ 2 个 Demo（手动模式 + 规则 Agent 模式，端到端跑通）
 
-### 已知问题（详见 `待解决问题.md`）
+### 已知问题（详见 [待解决问题.md](待解决问题.md)，下表为摘要）
 
 | # | 问题 | 优先级 | 状态 |
 |---|------|--------|------|
 | 1 | Snapshot 与 Executor 选择器不一致 | 🔴 | ✅ 已修复 |
 | 2 | click/page_changed 始终为 True | 🔴 | ✅ 已修复 |
 | 3 | texts 含 span 噪音 | 🟡 | 待解决 |
-| 4 | BrowserTool/SnapshotGenerator 无测试 | 🟡 | 待解决 |
-| 5 | _smart_wait 每次等 8 秒 | 🟡 | 待解决 |
+| 4 | BrowserTool/SnapshotGenerator 无测试 | 🟡 | 部分完成（BrowserTool click 已有测试；SnapshotGenerator 仍缺） |
+| 5 | _smart_wait 每次等 8 秒 | 🟡 | ✅ 已修复（wait_for_load_state 3s） |
 | 6 | ElementInfo 不保留 data-testid | 🟢 | 待解决 |
-| 7 | Observation.ok() data 参数风险 | 🟢 | 待解决 |
-| 8 | 定位契约不完整 | 🔴 | 待解决 |
-| 9 | data 嵌套已影响功能 | 🔴 | 待解决 |
-| 10 | page_changed 仅比较 URL | 🟡 | 待解决 |
-| 11 | Snapshot 未过滤不可见元素 | 🟡 | 待解决 |
+| 7 | Observation.ok() data 参数风险 | 🟢 | ✅ 已修复 |
+| 8 | 定位契约不完整 | 🔴 | ✅ 已修复 |
+| 9 | data 嵌套已影响功能 | 🔴 | ✅ 已修复 |
+| 10 | page_changed 仅比较 URL | 🟡 | ✅ 已修复（URL + 标题 + DOM 指纹） |
+| 11 | Snapshot 未过滤不可见元素 | 🟡 | ✅ 已修复 |
 | 12 | Action.validate() 验证不完整 | 🟡 | 待解决 |
-| 13 | 测试命令与安装方式不匹配 | 🟡 | 待解决 |
+| 13 | 测试命令与安装方式不匹配 | 🟡 | ✅ 已修复 |
 
 ---
 
@@ -367,7 +389,7 @@ class Observer:
 | 版本 | 目标 | 关键变更 | 状态 |
 |------|------|----------|------|
 | **V0.1** | 执行层：Browser Tool + Snapshot + Observation + Schema | 核心执行框架 | ✅ 完成 |
-| **V0.2** | Agent Loop：规则驱动 Planner | `Planner.plan()` 具体实现；`RuleBasedPlanner` 规则填充；Snapshot 增强 bbox/不可见元素过滤 | ⏳ 规划中 |
+| **V0.2** | Agent Loop：规则驱动 Planner | `RuleBasedPlanner` 规则引擎（目标解析：URL/搜索词/点击目标/等待条件 + 8 条内置规则）；Snapshot 不可见元素过滤；click() page_changed DOM 指纹检测 | ✅ 完成 |
 | **V0.3** | 接入 LLM：LLM Planner | `LLMPlanner` 类；prompt 模板；Snapshot→LLM→Action 管线 | 📋 待开始 |
 | **V0.4** | Reflection：错误恢复与重试 | Agent 失败重试；循环检测；后退/刷新恢复 | 📋 待开始 |
 | **V0.5** | Memory：历史操作与上下文记忆 | 摘要式记忆；滑动窗口；上下文压缩 | 📋 待开始 |
@@ -375,7 +397,7 @@ class Observer:
 
 ### 各版本关键关注点
 
-- **V0.2 重点：** `snapshot.py` 需要添加 `is_visible` 过滤、完善 `_build_selector`；`planner.py` 需要实现 `RuleBasedPlanner` 的具体规则；`playwright.py:click()` 的 page_changed 要同时考虑 DOM 变化
+- **V0.2（已完成）备注：** Snapshot 不可见元素过滤与 `_build_selector` 已完成；`RuleBasedPlanner` 8 条规则已完成（含点击目标、等待条件）；click() page_changed 已含 DOM 指纹。遗留项：bbox 未启用、SnapshotGenerator 无独立测试
 - **V0.3 重点：** `llm/` 和 `prompts/` 目录的实现；Agent 的 `run()` 需要切换到 LLM Planner；`observe_simplified()` 需要实际被调用
 - **V0.4 重点：** Agent 的 run() 循环需要增加重试逻辑和循环检测
 - **V0.5 重点：** Agent 的 history 管理需要压缩和摘要策略
@@ -386,9 +408,10 @@ class Observer:
 
 - **Schema 测试（现有）：** 纯数据类测试，无外部依赖
 - **Executor 测试（现有）：** Mock BrowserTool 验证 dispatch 和参数传递
-- **BrowserTool 测试（缺失）：** AsyncMock Page 对象，验证 Playwright 调用参数
+- **Planner 测试（现有）：** Mock Snapshot 验证规则匹配与状态推进
+- **BrowserTool 测试（部分）：** AsyncMock Page 对象，已覆盖 click() page_changed DOM 指纹检测
 - **SnapshotGenerator 测试（缺失）：** Mock Page 返回模拟 DOM，验证提取逻辑
-- **Agent 集成测试（未来）：** 端到端流程验证
+- **Agent 集成测试（未来）：** 端到端流程验证（当前以 Demo 代替）
 
 ### 运行测试
 
