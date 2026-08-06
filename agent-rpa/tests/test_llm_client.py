@@ -8,6 +8,7 @@ LLM Client 抽象测试（V0.3 阶段 A）
 """
 
 import os
+import sys
 
 import pytest
 
@@ -22,7 +23,15 @@ from agent.llm import (
     MockLLMClient,
     OpenAILLMClient,
     load_env_files,
+    openai_client,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_real_env(monkeypatch, tmp_path):
+    """模块内默认隔离真实 .env（cwd 与包目录），避免本机真实 Key 污染测试进程。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(openai_client, "_PROJECT_ENV", tmp_path / "unused.env")
 
 
 class TestMockLLMClient:
@@ -114,6 +123,18 @@ class TestOpenAILLMClient:
     def test_explicit_api_key_accepted_without_env(self, monkeypatch):
         """显式传入 api_key 时无需环境变量（未装 openai 时提示安装依赖）"""
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        # 模拟 openai 未安装：拦截 import，让 OpenAILLMClient 提示安装依赖
+        import builtins
+
+        monkeypatch.delitem(sys.modules, "openai", raising=False)
+        real_import = builtins.__import__
+
+        def _block_openai(name, *args, **kwargs):
+            if name == "openai":
+                raise ImportError("No module named 'openai'")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _block_openai)
         with pytest.raises(LLMError, match="openai"):
             OpenAILLMClient(api_key="sk-dummy")
 
@@ -202,11 +223,12 @@ class TestEnvFileLoading:
 
     @pytest.fixture
     def isolated_env(self, monkeypatch, tmp_path):
-        """把 cwd 与家目录都指向临时目录，并清除测试 Key，隔离真实环境。"""
+        """把 cwd 与家目录都指向临时目录，隔离真实环境与包目录 .env。"""
         from pathlib import Path
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr(openai_client, "_PROJECT_ENV", tmp_path / "unused.env")
         monkeypatch.delenv("_BP_TEST_KEY", raising=False)
 
     def test_loads_key_from_cwd_env(self, isolated_env, tmp_path):
@@ -215,6 +237,20 @@ class TestEnvFileLoading:
         )
         load_env_files()
         assert os.environ["_BP_TEST_KEY"] == "hello"
+        os.environ.pop("_BP_TEST_KEY", None)
+
+    def test_project_level_env_loaded_from_any_cwd(
+        self, monkeypatch, isolated_env, tmp_path
+    ):
+        """cwd 无 .env 时，包目录（agent-rpa）下的 .env 仍会被加载。"""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        (project_dir / ".env").write_text(
+            "_BP_TEST_KEY=project\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(openai_client, "_PROJECT_ENV", project_dir / ".env")
+        load_env_files()
+        assert os.environ["_BP_TEST_KEY"] == "project"
         os.environ.pop("_BP_TEST_KEY", None)
 
     def test_user_level_env_file_also_loaded(self, isolated_env, tmp_path):

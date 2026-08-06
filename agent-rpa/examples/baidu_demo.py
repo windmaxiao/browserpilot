@@ -18,9 +18,12 @@ from agent.core.agent import Agent
 from agent.core.executor import Executor
 from agent.core.observer import Observer
 from agent.core.planner import RuleBasedPlanner
+from agent.logging import setup_logging
 
 
 async def main():
+    # 控制台 + logs/ 目录按天滚动文件
+    setup_logging()
     goal = "打开 https://www.baidu.com 查找 北京时间 点击 北京时间 - 百度百科 等待 页面加载完成"
     logger.info("🎯 目标: {}", goal)
 

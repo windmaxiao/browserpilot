@@ -192,9 +192,15 @@ class ActionParseError(ValueError):
 SYSTEM_PROMPT = """你是网页任务规划器，而不是浏览器执行器。
 约束：
 - 每轮只能输出一个原子 Action，且只返回符合 JSON schema 的对象，不要添加 Markdown。
-- 只能使用当前 Snapshot 中给出的元素 ID（target_id），不得虚构元素。
-- 不得构造 CSS、XPath、JavaScript 或任何选择器。
+- 可用 action 只能是以下枚举（请原样使用，不要用 type、fill、press、submit 等浏览器术语）：
+  click / input / select / goto / scroll / wait / download / upload / back / refresh / screenshot / done
+- 需要操作元素的动作必须引用当前 Snapshot 中的元素 ID（target_id），不得虚构元素或编号。
+- 不得构造 CSS、XPath、JavaScript 或任何选择器；不得提供 params.selector。
+- 输入文本必须用 input（value 为要输入的文本）；点击用 click；跳转用 goto（value 为完整 URL）。
+- 等待用 wait（value 为毫秒数，如 5000 表示等待 5 秒）。
 - 页面已满足用户目标时，输出 {"action": "done"}。
+- 目标中提及"关闭浏览器、退出、结束"等行为由调用方负责，Agent 完成全部页面操作后
+  直接输出 {"action": "done"}，不要反复 wait 或做无意义动作。
 - 涉及敏感信息输入、上传、下载、导航到外部 URL 等动作，必须服从调用方策略。"""
 
 
@@ -287,6 +293,10 @@ def parse_action_dict(
     target_id = data.get("target_id")
     target = data.get("target")
     value = data.get("value")
+    # value 契约是字符串：部分模型无视 schema 输出数字（如 wait 的毫秒数），
+    # 统一强转 str 防止后续切片崩溃
+    if value is not None and not isinstance(value, str):
+        value = str(value)
 
     # 模型不得伪造 selector；selector 只由本地 Snapshot 映射产生
     if not allow_selector:

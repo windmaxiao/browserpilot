@@ -77,6 +77,10 @@ PROVIDER_PRESETS: dict[str, dict[str, str]] = {
 }
 
 
+# 包目录（agent-rpa）下的 .env：保证从任意 cwd 运行 demo/脚本都能找到项目配置
+_PROJECT_ENV = Path(__file__).resolve().parent.parent.parent / ".env"
+
+
 def _load_dotenv_file(path: Path) -> None:
     """解析 ``KEY=VALUE`` 格式的 .env 文件，仅填充尚未设置的环境变量。
 
@@ -105,11 +109,13 @@ def _load_dotenv_file(path: Path) -> None:
 def load_env_files() -> None:
     """加载本地 .env 配置（先项目级后用户级，均不覆盖已有环境变量）。
 
-    - 项目级：当前工作目录下的 ``.env``
+    - 项目级：当前工作目录下的 ``.env``，其次包目录（agent-rpa）下的 ``.env``
+      （保证从任意目录运行 demo/脚本都能找到，cwd 优先）
     - 用户级：``~/.browserpilot/.env``（存放跨项目通用的厂商 Key）
-    幂等、可安全重复调用；两个文件均不存在时行为与之前完全一致。
+    幂等、可安全重复调用；文件均不存在时行为与之前完全一致。
     """
     _load_dotenv_file(Path.cwd() / ".env")
+    _load_dotenv_file(_PROJECT_ENV)
     _load_dotenv_file(Path.home() / ".browserpilot" / ".env")
 
 

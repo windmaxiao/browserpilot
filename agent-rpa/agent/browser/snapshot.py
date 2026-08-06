@@ -12,6 +12,7 @@ Snapshot 是 Agent 对网页的"认知"，不是 HTML。
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 from loguru import logger
@@ -28,10 +29,24 @@ class SnapshotGenerator:
     # 需要排除的隐藏或无意义标签
     EXCLUDE_TAGS = {"script", "style", "noscript", "svg", "path", "meta", "link"}
 
+    # 单个元素需要读取的 HTML 属性（一次并发 gather 全部取回，避免逐属性 CDP 往返）
+    ATTR_KEYS = (
+        "data-testid", "id", "role", "type", "href", "src", "alt",
+        "aria-label", "value", "placeholder",
+    )
+    # 写入 ElementInfo.attributes 的属性（与历史字段语义保持一致）
+    ATTRIBUTE_FIELDS = ("data-testid", "role", "type", "href", "src", "alt")
+
     def __init__(self, page: Page):
         self._page = page
         self._element_counter = 0
         logger.debug("SnapshotGenerator 创建")
+
+    def set_page(self, page: Page) -> None:
+        """更新当前页面引用（点击新标签页自动跟随后由 BrowserManager 回调）。"""
+        self._page = page
+        self._element_counter = 0
+        logger.debug("SnapshotGenerator 页面已切换 | URL: {}", page.url)
 
     async def generate(self) -> Snapshot:
         """生成当前页面的 Snapshot"""
@@ -39,16 +54,22 @@ class SnapshotGenerator:
         start = time.time()
         # element_id 仅在单次 Snapshot 内有效，每次生成前重置（V0.2 计划 2.1）
         self._element_counter = 0
-        title = await self._page.title()
-        url = self._page.url
+        try:
+            title = await self._page.title()
+            url = self._page.url
 
-        # 并行提取各类元素
-        buttons = await self._extract_buttons()
-        inputs = await self._extract_inputs()
-        links = await self._extract_links()
-        texts = await self._extract_texts()
-        selects = await self._extract_selects()
-        loading = await self._is_loading()
+            # 并行提取各类元素
+            buttons = await self._extract_buttons()
+            inputs = await self._extract_inputs()
+            links = await self._extract_links()
+            texts = await self._extract_texts()
+            selects = await self._extract_selects()
+            loading = await self._is_loading()
+        except Exception as e:
+            # 页面已被关闭（用户手动关闭 / 弹窗跳转）时不崩溃，返回空 Snapshot。
+            # 上层可通过 loading=True + 空元素识别，并交由 Agent 循环检测优雅收尾。
+            logger.warning("⚠️ Snapshot 生成失败（页面可能已关闭）: {}", e)
+            return Snapshot(title="", url="", loading=True)
 
         elapsed = time.time() - start
         logger.info(
@@ -74,11 +95,10 @@ class SnapshotGenerator:
             "button, [role='button'], input[type='submit'], input[type='button'], "
             "a[class*='btn'], [class*='button']"
         )
-        result: list[ElementInfo] = []
-        for i, el in enumerate(elements):
-            info = await self._extract_element_info(el, i)
-            if info and info.text.strip():
-                result.append(info)
+        infos = await asyncio.gather(
+            *(self._extract_element_info(el, i) for i, el in enumerate(elements))
+        )
+        result = [info for info in infos if info and info.text.strip()]
         self._disambiguate_selectors(result)
         return result
 
@@ -88,32 +108,20 @@ class SnapshotGenerator:
             "input:not([type='hidden']):not([type='submit']):not([type='button']), "
             "textarea, [contenteditable='true'], [role='textbox']"
         )
-        result: list[ElementInfo] = []
-        for i, el in enumerate(elements):
-            info = await self._extract_element_info(el, i)
-            if info:
-                try:
-                    info.placeholder = await el.get_attribute("placeholder") or ""
-                except Exception:
-                    pass
-                result.append(info)
+        infos = await asyncio.gather(
+            *(self._extract_element_info(el, i) for i, el in enumerate(elements))
+        )
+        result = [info for info in infos if info]
         self._disambiguate_selectors(result)
         return result
 
     async def _extract_links(self) -> list[ElementInfo]:
         """提取所有链接"""
         elements = await self._page.query_selector_all("a[href]")
-        result: list[ElementInfo] = []
-        for i, el in enumerate(elements):
-            info = await self._extract_element_info(el, i)
-            if info and info.text.strip():
-                href = ""
-                try:
-                    href = await el.get_attribute("href") or ""
-                except Exception:
-                    pass
-                info.attributes["href"] = href
-                result.append(info)
+        infos = await asyncio.gather(
+            *(self._extract_element_info(el, i) for i, el in enumerate(elements))
+        )
+        result = [info for info in infos if info and info.text.strip()]
         self._disambiguate_selectors(result)
         return result
 
@@ -122,91 +130,94 @@ class SnapshotGenerator:
         elements = await self._page.query_selector_all(
             "h1, h2, h3, h4, h5, h6, p, span, label, li, td, th, strong, em"
         )
-        result: list[ElementInfo] = []
-        for i, el in enumerate(elements):
-            info = await self._extract_element_info(el, i)
-            if info and info.text.strip():
-                result.append(info)
-        return result
+        infos = await asyncio.gather(
+            *(self._extract_element_info(el, i) for i, el in enumerate(elements))
+        )
+        return [info for info in infos if info and info.text.strip()]
 
     async def _extract_selects(self) -> list[ElementInfo]:
         """提取下拉选择框"""
         elements = await self._page.query_selector_all("select")
-        result: list[ElementInfo] = []
-        for i, el in enumerate(elements):
-            info = await self._extract_element_info(el, i)
-            if info:
-                result.append(info)
+        infos = await asyncio.gather(
+            *(self._extract_element_info(el, i) for i, el in enumerate(elements))
+        )
+        result = [info for info in infos if info]
         self._disambiguate_selectors(result)
         return result
 
     async def _extract_element_info(
         self, el, index: int
     ) -> ElementInfo | None:
-        """从单个元素提取信息"""
+        """从单个元素提取信息。
+
+        性能：元素自身的全部 CDP 读取（tag/可见性/文本/属性/bbox）一次并发 gather
+        取回，避免逐属性串行往返（页面元素多时耗时从秒级降到亚秒级）。
+        """
         try:
-            tag = await el.evaluate("el => el.tagName.toLowerCase()") or ""
-            if tag in self.EXCLUDE_TAGS:
-                return None
-
-            # 跳过不可见元素（避免 Agent 规划到无法操作的控件）
-            try:
-                if not await el.is_visible():
-                    return None
-            except Exception:
-                pass
-
-            text = (await el.inner_text()).strip()
-            if not text:
-                text = (await el.get_attribute("value")) or ""
-                text = text.strip()
-            if not text:
-                text = (await el.get_attribute("aria-label")) or ""
-
-            aria_label = await el.get_attribute("aria-label") or ""
-
-            # 提取重要 HTML 属性到 attributes 字典
-            attributes: dict[str, str] = {}
-            for attr in ("data-testid", "role", "type", "href", "src", "alt"):
-                try:
-                    val = await el.get_attribute(attr)
-                    if val:
-                        attributes[attr] = val
-                except Exception:
-                    pass
-
-            # 生成选择器
-            selector = await self._build_selector(el, tag, text)
-
-            # bounding box（V0.2+ 启用）
-            bbox = None
-            try:
-                box = await el.bounding_box()
-                if box:
-                    bbox = {"x": box["x"], "y": box["y"],
-                            "width": box["width"], "height": box["height"]}
-            except Exception:
-                pass
-
-            # 分配全局唯一元素 ID
-            self._element_counter += 1
-            element_id = f"e{self._element_counter}"
-
-            return ElementInfo(
-                text=text[:200],
-                element_id=element_id,
-                tag=tag,
-                element_type=self._infer_type(tag),
-                selector=selector,
-                bbox=bbox,
-                aria_label=aria_label,
-                attributes=attributes,
-                index=index,
+            tag, visible, text, aria_label, bbox = await asyncio.gather(
+                el.evaluate("el => el.tagName.toLowerCase()"),
+                el.is_visible(),
+                el.inner_text(),
+                el.get_attribute("aria-label"),
+                el.bounding_box(),
+            )
+            attr_values = await asyncio.gather(
+                *[el.get_attribute(attr) for attr in self.ATTR_KEYS]
             )
         except Exception:
             return None
 
-    async def _build_selector(self, el, tag: str, text: str) -> str:
+        tag = tag or ""
+        if tag in self.EXCLUDE_TAGS:
+            return None
+        # 跳过不可见元素（避免 Agent 规划到无法操作的控件）
+        if not visible:
+            return None
+
+        all_attrs = {
+            attr: (val or "") for attr, val in zip(self.ATTR_KEYS, attr_values)
+        }
+        text = (text or "").strip()
+        if not text:
+            text = all_attrs.get("value", "").strip()
+        if not text:
+            text = (aria_label or "").strip()
+        aria_label = aria_label or ""
+        attributes = {
+            attr: all_attrs[attr]
+            for attr in self.ATTRIBUTE_FIELDS
+            if all_attrs.get(attr)
+        }
+
+        # 生成选择器（属性已取回，无需再发起 CDP 查询）
+        selector = await self._build_selector(el, tag, text, all_attrs)
+
+        # bounding box（V0.2+ 启用）
+        bbox_dict = None
+        if bbox:
+            bbox_dict = {"x": bbox["x"], "y": bbox["y"],
+                         "width": bbox["width"], "height": bbox["height"]}
+
+        # 分配全局唯一元素 ID
+        self._element_counter += 1
+        element_id = f"e{self._element_counter}"
+
+        return ElementInfo(
+            text=text[:200],
+            element_id=element_id,
+            tag=tag,
+            element_type=self._infer_type(tag),
+            selector=selector,
+            bbox=bbox_dict,
+            aria_label=aria_label,
+            placeholder=all_attrs.get("placeholder", ""),
+            attributes=attributes,
+            index=index,
+        )
+
+    async def _build_selector(
+        self, el, tag: str, text: str, attributes: dict | None = None
+    ) -> str:
         """为元素生成 Playwright 选择器。
 
         稳定性优先（V0.2 计划 2.3）：
@@ -218,36 +229,31 @@ class SnapshotGenerator:
         6. 标签名兜底
 
         ID / 属性值一律经 CSS 转义，禁止直接拼接未转义值（Issue 16）。
+
+        ``attributes`` 为已取回的属性字典（避免额外 CDP 往返）；
+        不传时回退为直接查询元素属性（保持旧签名兼容）。
         """
-        testid = ""
-        try:
-            testid = await el.get_attribute("data-testid") or ""
-        except Exception:
-            pass
+        async def _get(key: str) -> str:
+            if attributes is not None:
+                return attributes.get(key, "")
+            try:
+                return (await el.get_attribute(key)) or ""
+            except Exception:
+                return ""
+
+        testid = await _get("data-testid")
         if testid:
             return f'[data-testid="{self._css_escape_string(testid)}"]'
 
-        el_id = ""
-        try:
-            el_id = await el.get_attribute("id") or ""
-        except Exception:
-            pass
+        el_id = await _get("id")
         if el_id:
             return f"#{self._css_escape_ident(el_id)}"
 
-        role = ""
-        try:
-            role = await el.get_attribute("role") or ""
-        except Exception:
-            pass
+        role = await _get("role")
         if role:
             return f'[role="{self._css_escape_string(role)}"]'
 
-        aria = ""
-        try:
-            aria = await el.get_attribute("aria-label") or ""
-        except Exception:
-            pass
+        aria = await _get("aria-label")
         if aria:
             return f'[aria-label="{self._css_escape_string(aria)}"]'
 

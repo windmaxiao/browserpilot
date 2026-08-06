@@ -30,7 +30,7 @@ from agent.prompts.planner import (
     serialize_history,
     serialize_snapshot,
 )
-from agent.schema.action import Action, done, goto
+from agent.schema.action import Action, VALID_ACTIONS, done, goto
 from agent.schema.snapshot import ElementInfo, Snapshot
 
 
@@ -110,7 +110,7 @@ def parse_goal(goal: str) -> TaskSpec:
 # ═══════════════════════════════════════════════════════════════
 
 class Planner:
-    """规划器基类（V0.2 由 RuleBasedPlanner 实现）。"""
+    """规划器基类（V0.2 由 RuleBasedPlanner 实现，V0.3 由 LLMPlanner 实现）。"""
 
     async def plan(self, snapshot: Snapshot, goal: str) -> Optional[Action]:
         raise NotImplementedError("Planner.plan() 未实现")
@@ -119,6 +119,30 @@ class Planner:
         self, snapshot: Snapshot, goal: str, history: list
     ) -> Optional[Action]:
         return await self.plan(snapshot, goal)
+
+    async def decompose(self, goal: str) -> Optional[list["TaskStep"]]:
+        """将目标拆解为步骤队列（V0.4 前瞻）。
+
+        默认返回 None（单步骤模式），由 Agent 将整个目标作为一步执行；
+        支持拆解的规划器（TaskPlanner）覆盖本方法返回有序步骤列表。
+        """
+        return None
+
+    async def plan_step(
+        self,
+        snapshot: Snapshot,
+        goal: str,
+        history: list,
+        *,
+        steps: Optional[list["TaskStep"]] = None,
+        current_index: Optional[int] = None,
+    ) -> Optional[Action]:
+        """针对当前任务步骤规划一个 Action。
+
+        默认退化为 plan_with_history（无步骤上下文）；支持分步上下文的
+        规划器（TaskPlanner）覆盖本方法，将当前步骤与剩余步骤注入提示词。
+        """
+        return await self.plan_with_history(snapshot, goal, history)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -419,12 +443,17 @@ class LLMPlanner(Planner):
         raw: Optional[dict] = None
         for attempt in range(self._max_repair_attempts + 1):
             try:
+                logger.debug(
+                    "🧠 LLM 请求（模型: {} | 第 {} 次）\n--- system ---\n{}\n--- user ---\n{}",
+                    self._model, attempt + 1, SYSTEM_PROMPT, user_prompt,
+                )
                 raw = await self._client.complete_json(
                     system_prompt=SYSTEM_PROMPT,
                     user_prompt=user_prompt,
                     schema=schema,
                     timeout=self._timeout,
                 )
+                logger.debug("🤖 LLM 响应: {}", json.dumps(raw, ensure_ascii=False))
             except LLMRetryableError as e:
                 logger.warning("LLM 调用遇到可重试错误，本次放弃: {}", e)
                 return None
@@ -449,6 +478,288 @@ class LLMPlanner(Planner):
         return (
             f"{original}\n\n"
             "你上次的输出无法通过校验，请重新输出一个合法的 Action JSON。\n"
+            f"可用 action 枚举: {', '.join(sorted(VALID_ACTIONS))}\n"
+            f"上次输出: {json.dumps(raw, ensure_ascii=False)}\n"
+            f"校验错误: {error}"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════
+# 两阶段规划（V0.4 前瞻）：任务步骤队列
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class TaskStep:
+    """任务拆解后的单个步骤。
+
+    kind 决定执行方式：
+    - ``action``：需要 LLM 决策的浏览器操作（goto/input/click/select/scroll...）
+    - ``wait``：纯等待步骤（等待加载/固定延时），由框架直接执行，不经过 LLM
+    - ``verify``：页面验收步骤，由框架直接校验（URL 包含 / 文本出现）
+    """
+
+    description: str                                # 人类可读描述，如"打开百度首页"
+    kind: str = "action"                            # action / wait / verify
+    params: dict = field(default_factory=dict)      # wait→{"ms": 5000}；verify→{"type": "url"|"text", "value": "..."}
+
+
+class TaskQueue:
+    """任务步骤队列：Agent 循环按序消费。"""
+
+    def __init__(self, steps: list[TaskStep]):
+        self._steps = list(steps)
+        self._index = 0
+
+    def __len__(self) -> int:
+        return len(self._steps)
+
+    def __bool__(self) -> bool:
+        return self.remaining() > 0
+
+    @property
+    def index(self) -> int:
+        """当前步骤下标（0 起）。"""
+        return self._index
+
+    def remaining(self) -> int:
+        return len(self._steps) - self._index
+
+    def peek(self) -> Optional[TaskStep]:
+        """返回当前步骤但不消费。"""
+        if self._index >= len(self._steps):
+            return None
+        return self._steps[self._index]
+
+    def pop(self) -> Optional[TaskStep]:
+        """消费当前步骤并前进。"""
+        if self._index >= len(self._steps):
+            return None
+        step = self._steps[self._index]
+        self._index += 1
+        return step
+
+    def steps(self) -> list[TaskStep]:
+        """返回全部步骤（含已消费，供上下文展示）。"""
+        return list(self._steps)
+
+
+# 拆解输出的 JSON schema（包一层 steps 数组，兼容 OpenAI 兼容端点的 object 输出）
+DECOMPOSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "steps": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "步骤描述，如「打开百度首页」「在搜索框输入北京时间」",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["action", "wait", "verify"],
+                        "description": "action=浏览器操作（LLM 决策）；wait=纯等待（框架执行）；verify=页面验收",
+                    },
+                    "params": {
+                        "type": "object",
+                        "description": "wait 步骤填 {\"ms\": 5000}；verify 步骤填 {\"type\": \"url\"|\"text\", \"value\": \"...\"}",
+                    },
+                },
+                "required": ["description", "kind"],
+            },
+        }
+    },
+    "required": ["steps"],
+}
+
+DECOMPOSE_PROMPT = """你是网页自动化任务拆解器。把用户目标拆解为**有序的步骤列表**，每个步骤必须是以下三种之一：
+- "action"：需要浏览器操作、由执行者按当前页面情况决策的步骤（goto / input / click / select / scroll 等）
+- "wait"：纯等待步骤（等待页面加载、固定延时），由框架自动执行，**执行者不需要为等待做任何决策**
+- "verify"：页面验收步骤，由框架自动校验（URL 包含某文本，或页面出现某文本）
+
+约束：
+- 每个 action 步骤必须能在**一个原子动作**内完成；一个动作做不完的（如"输入并提交"）拆成两步。
+- "打开/访问 URL"拆为 goto 步骤（params 给 url）；"搜索/查找 X"拆为「输入关键词」+「点击搜索/提交」两步。
+- 明确写出的点击目标（如"点击「北京时间 - 百度百科」链接"）拆为 click 步骤，description 写清点击什么。
+- "等待页面加载完成""等待五秒"等表述拆为 wait 步骤，并在 params.ms 给出毫秒数。
+- "关闭浏览器/退出/结束"由调用方负责，**不要拆出这类步骤**。
+- 最后一步通常是 verify（如"页面出现'北京时间'"），用于确认任务达成。
+只输出符合 schema 的 JSON 对象（steps 数组），不要 Markdown。"""
+
+
+def parse_decompose_response(raw: Optional[dict], goal: str) -> Optional[list[TaskStep]]:
+    """将 LLM 拆解输出安全转换为 TaskStep 列表。
+
+    无效 / 非法 kind / 空描述条目直接丢弃；全部无效时返回 None（上层回退单步骤模式）。
+    """
+    if not raw:
+        return None
+    raw_steps = raw.get("steps") if isinstance(raw, dict) else raw
+    if not isinstance(raw_steps, list):
+        return None
+
+    steps: list[TaskStep] = []
+    for item in raw_steps:
+        if not isinstance(item, dict):
+            continue
+        description = str(item.get("description", "")).strip()
+        kind = str(item.get("kind", "action")).strip()
+        if not description or kind not in ("action", "wait", "verify"):
+            continue
+        params = item.get("params") or {}
+        params = params if isinstance(params, dict) else {}
+        if kind == "wait":
+            try:
+                params = {"ms": max(0, int(params.get("ms", 1000)))}
+            except (TypeError, ValueError):
+                params = {"ms": 1000}
+        elif kind == "verify":
+            vtype = str(params.get("type", "text")).strip() or "text"
+            params = {"type": vtype, "value": str(params.get("value", "")).strip()}
+        steps.append(TaskStep(description=description, kind=kind, params=params))
+    return steps or None
+
+
+class TaskPlanner(Planner):
+    """两阶段规划器（V0.4 前瞻）：目标 → 步骤队列 → 按步骤规划。
+
+    与 :class:`LLMPlanner` 的区别：
+    - ``decompose()`` 先把目标拆解为步骤队列（一次 LLM 调用）。
+    - ``plan_step()`` 的提示词携带「当前步骤 + 剩余步骤」，让 LLM 聚焦
+      完成当前步骤，而不是对着整个目标即兴发挥（消除反复 wait 的空转）。
+    - 等待 / 验收类步骤由 Agent 直接执行，完全不经过 LLM。
+
+    拆解失败时 ``decompose()`` 返回 None，Agent 自动回退为单步骤模式
+    （等价于旧 LLMPlanner 行为），保证可用性。
+    """
+
+    def __init__(
+        self,
+        client: LLMClient,
+        *,
+        model: str = "",
+        max_repair_attempts: int = 1,
+        timeout: int = 30_000,
+        constraints: Optional[list[str]] = None,
+    ):
+        self._client = client
+        self._model = model
+        self._max_repair_attempts = max_repair_attempts
+        self._timeout = timeout
+        self._constraints = list(constraints) if constraints else None
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    async def decompose(self, goal: str) -> Optional[list[TaskStep]]:
+        """调用 LLM 将目标拆解为步骤列表；失败 / 无效返回 None（回退单步骤）。"""
+        try:
+            logger.debug(
+                "🧠 任务拆解请求（模型: {}）\n--- system ---\n{}\n--- user ---\n目标: {}",
+                self._model, DECOMPOSE_PROMPT, goal,
+            )
+            raw = await self._client.complete_json(
+                system_prompt=DECOMPOSE_PROMPT,
+                user_prompt=f"用户目标：{goal}\n请把目标拆解为有序步骤。",
+                schema=DECOMPOSE_SCHEMA,
+                timeout=self._timeout,
+            )
+            logger.debug("🤖 拆解响应: {}", json.dumps(raw, ensure_ascii=False))
+        except LLMRetryableError as e:
+            logger.warning("任务拆解遇到可重试错误，本次放弃: {}", e)
+            return None
+        except LLMError as e:
+            logger.warning("任务拆解失败: {}", e)
+            return None
+
+        steps = parse_decompose_response(raw, goal)
+        if not steps:
+            logger.warning("任务拆解结果无效，回退为单步骤模式")
+            return None
+        logger.info(
+            "🧭 任务拆解完成: {} 步 | {}",
+            len(steps), " → ".join(s.description for s in steps),
+        )
+        return steps
+
+    async def plan(self, snapshot: Snapshot, goal: str) -> Optional[Action]:
+        return await self.plan_with_history(snapshot, goal, [])
+
+    async def plan_with_history(
+        self, snapshot: Snapshot, goal: str, history: list
+    ) -> Optional[Action]:
+        return await self.plan_step(snapshot, goal, history)
+
+    async def plan_step(
+        self,
+        snapshot: Snapshot,
+        goal: str,
+        history: list,
+        *,
+        steps: Optional[list[TaskStep]] = None,
+        current_index: Optional[int] = None,
+    ) -> Optional[Action]:
+        """针对当前任务步骤规划一个 Action（提示词注入步骤上下文）。"""
+        view = serialize_snapshot(snapshot)
+        schema = build_action_schema()
+
+        context = build_user_prompt(
+            goal, view, serialize_history(history), constraints=self._constraints
+        )
+        if steps and current_index is not None and 0 <= current_index < len(steps):
+            current = steps[current_index]
+            remaining = steps[current_index + 1:]
+            context += (
+                f"\n\n当前任务阶段：第 {current_index + 1}/{len(steps)} 步「{current.description}」。"
+                f"请输出一个 Action 完成这一步。"
+            )
+            if remaining:
+                context += "\n剩余步骤：" + " → ".join(
+                    s.description for s in remaining[:5]
+                )
+
+        user_prompt = context
+        raw: Optional[dict] = None
+        for attempt in range(self._max_repair_attempts + 1):
+            try:
+                logger.debug(
+                    "🧠 LLM 请求（模型: {} | 第 {} 次）\n--- system ---\n{}\n--- user ---\n{}",
+                    self._model, attempt + 1, SYSTEM_PROMPT, user_prompt,
+                )
+                raw = await self._client.complete_json(
+                    system_prompt=SYSTEM_PROMPT,
+                    user_prompt=user_prompt,
+                    schema=schema,
+                    timeout=self._timeout,
+                )
+                logger.debug("🤖 LLM 响应: {}", json.dumps(raw, ensure_ascii=False))
+            except LLMRetryableError as e:
+                logger.warning("LLM 调用遇到可重试错误，本次放弃: {}", e)
+                return None
+            except LLMError as e:
+                logger.warning("LLM 调用失败: {}", e)
+                return None
+            try:
+                return parse_action_dict(raw, snapshot)
+            except ActionParseError as e:
+                logger.warning(
+                    "Action 解析失败（第 {}/{} 次）: {}",
+                    attempt + 1, self._max_repair_attempts + 1, e,
+                )
+                if attempt >= self._max_repair_attempts:
+                    return None
+                user_prompt = self._build_repair_prompt(user_prompt, raw, str(e))
+        return None
+
+    @staticmethod
+    def _build_repair_prompt(original: str, raw: dict, error: str) -> str:
+        """构造修复请求：附带上次原始输出与校验错误，Snapshot 保持不变。"""
+        return (
+            f"{original}\n\n"
+            "你上次的输出无法通过校验，请重新输出一个合法的 Action JSON。\n"
+            f"可用 action 枚举: {', '.join(sorted(VALID_ACTIONS))}\n"
             f"上次输出: {json.dumps(raw, ensure_ascii=False)}\n"
             f"校验错误: {error}"
         )

@@ -161,3 +161,22 @@ async def test_text_selector_quote_escaped():
     sg = SnapshotGenerator(AsyncMock())
     selector = await sg._build_selector(el, "button", '点击"确定"')
     assert selector == 'button:has-text("点击\\"确定\\"")'
+
+
+# ═══════════════════════════════════════════════════════════════
+# 页面关闭防御（Terminal#146-766）
+# ═══════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_generate_returns_empty_snapshot_when_page_closed():
+    """页面被关闭（TargetClosedError）时 generate() 不崩溃，返回空 Snapshot"""
+    page = make_page()
+    page.title = AsyncMock(side_effect=Exception("Target page, context or browser has been closed"))
+    sg = SnapshotGenerator(page)
+
+    snap = await sg.generate()
+
+    assert snap.title == ""
+    assert snap.url == ""
+    assert snap.loading is True
+    assert snap.is_empty()

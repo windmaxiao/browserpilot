@@ -102,7 +102,7 @@ class Executor:
             return Observation.fail(error="input 动作缺少 value")
         selector = self._resolve_target(action)
         if selector:
-            logger.debug("input → selector: {} | value: {}", selector, action.value[:80])
+            logger.debug("input → selector: {} | value: {}", selector, str(action.value)[:80])
             return await self._tool.input(
                 selector,
                 action.value,
@@ -152,7 +152,15 @@ class Executor:
         return await self._tool.scroll(direction=direction, amount=amount)
 
     async def _execute_wait(self, action: Action) -> Observation:
-        ms = action.params.get("ms", 1000)
+        # 等待时长：params.ms（毫秒）优先；LLM 常用 value 表达（如 5000），兜底支持
+        ms = action.params.get("ms")
+        if ms is None and action.value:
+            try:
+                ms = int(str(action.value).strip())
+            except ValueError:
+                ms = None
+        if ms is None:
+            ms = 1000
         logger.debug("wait → {}ms", ms)
         return await self._tool.wait(ms=ms)
 

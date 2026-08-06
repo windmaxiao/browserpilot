@@ -1,37 +1,32 @@
 """
-LLM Agent 模式 Demo —— LLM 驱动的完整 Agent Loop（V0.3）
+LLM Agent 模式 Demo —— LLM 驱动真实百度搜索（V0.3）
 
-运行环境：Playwright 浏览器 + 可用的 OpenAI 兼容 API
-目标：让 LLMPlanner 自动完成一次搜索任务（在本地受控页面，不依赖外网）
+目标：LLM 先把目标拆解为步骤队列，再依据脱敏 Snapshot 逐步执行一次真实百度搜索：
+    goto(百度) → input(关键词) → click(搜索) → click(百科链接) → wait(框架直执行) → done
 
-执行流程（全部由 LLM 依据 Snapshot 决策）：
-    goto(本地搜索页) → input(关键词) → click(搜索按钮) → done
+与 baidu_demo.py（规则引擎）的区别：本 Demo 的步骤拆解与每步操作决策均由大模型完成，
+等待 / 验收类步骤由框架直接执行（不经过 LLM）；
+LLM 只看到可交互元素摘要与 target_id，选择器由本地 Snapshot 映射注入。
 
 前置条件：
     pip install -e ".[llm]"        # 安装 openai 依赖
 
-API 配置（二选一）：
-    1) 默认 OpenAI / 任意 OpenAI 兼容端点（中转、自部署）：
-       $env:OPENAI_API_KEY = "sk-xxx"          # 必填
-       $env:OPENAI_BASE_URL = "https://..."    # 可选
-       $env:OPENAI_MODEL = "gpt-4o-mini"       # 可选
-    2) 国内大模型预设（DeepSeek / Kimi / 智谱 / 通义 / 豆包 / 千帆 / 星火）：
-       $env:LLM_PROVIDER = "deepseek"          # 预设名，见 agent/llm/openai_client.py PROVIDER_PRESETS
-       $env:DEEPSEEK_API_KEY = "sk-xxx"        # 厂商专属变量（可用 OPENAI_API_KEY 回退）
+API 配置（三选一，见 print_config_hint）：
+    1) 默认 OpenAI / 任意 OpenAI 兼容端点（中转、自部署）
+    2) 国内大模型预设：LLM_PROVIDER（deepseek/moonshot/zhipu/qwen/doubao/ernie/spark）
+    3) 本地 .env 文件（当前目录或 ~/.browserpilot/.env）
 
-可选环境变量：
-    LLM_PROVIDER  国内大模型预设名（deepseek/moonshot/zhipu/qwen/doubao/ernie/spark）
-    OPENAI_MODEL  模型名（不设置时使用 provider 预设的默认模型）
-    OPENAI_BASE_URL  兼容 API 的 base_url（覆盖 provider 预设，用于中转/自部署）
+用法（在 agent-rpa 目录下）：
+    py -3.11 examples/llm_baidu_demo.py                                  # 默认目标
+    py -3.11 examples/llm_baidu_demo.py "打开 百度 查找 大模型"           # 自定义目标
 
-说明：这是受控 Demo，不涉及上传、下载或外网导航等高危操作；
+说明：真实网站布局可能变化，若一次未成功可调整 goal 措辞或重试；
 未配置 API Key 时会给出明确提示，不会发起任何网络请求。
 """
 
 import asyncio
 import os
 import sys
-from pathlib import Path
 
 from loguru import logger
 
@@ -40,14 +35,15 @@ from agent.browser.snapshot import SnapshotGenerator
 from agent.core.agent import Agent
 from agent.core.executor import Executor
 from agent.core.observer import Observer
-from agent.core.planner import LLMPlanner
+from agent.core.planner import TaskPlanner
 from agent.llm import LLMError, OpenAILLMClient, resolve_api_key_env
 from agent.logging import setup_logging
 
-SCRIPT_DIR = Path(__file__).parent
-SEARCH_PAGE_URL = (SCRIPT_DIR / "search_page.html").as_uri()
-
-DEFAULT_GOAL = f"打开 {SEARCH_PAGE_URL} 查找 北京时间"
+DEFAULT_GOAL = (
+    "打开 https://www.baidu.com 搜索 北京时间 "
+    "然后点击搜索结果中的「北京时间 - 百度百科」链接，等待页面加载完成 "
+    "等待五秒，最后关闭浏览器"
+)
 
 
 def print_config_hint(provider: str | None, error: LLMError) -> None:
@@ -90,21 +86,28 @@ async def main() -> int:
         gen = SnapshotGenerator(manager.page)
         manager.subscribe_page(gen.set_page)
         observer = Observer(gen)
-        planner = LLMPlanner(client, model=client.model, timeout=30_000)
+        planner = TaskPlanner(client, model=client.model, timeout=30_000)
         agent = Agent(
             observer=observer,
             planner=planner,
             executor=Executor(tool),
-            max_steps=20,
+            max_steps=25,
         )
 
         result = await agent.run(goal)
 
         logger.info("📋 任务结果: success={} | data={}", result.success, result.data)
+        for step in agent.history:
+            a = step["action"]
+            o = step["observation"]
+            logger.info(
+                "  Step {}: {}({}) → success={}",
+                step["step"], a.action, a.value or a.target_id, o.success,
+            )
         if result.is_error:
             logger.error("❌ 任务失败: {}", result.error)
             return 1
-        logger.info("🎉 LLM Agent 端到端跑通！")
+        logger.info("🎉 LLM Agent 在真实百度网站跑通！")
         return 0
     finally:
         await manager.stop()

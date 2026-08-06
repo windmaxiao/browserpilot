@@ -68,7 +68,11 @@ python examples/manual_demo.py
 python examples/agent_demo.py
 python examples/baidu_demo.py
 
-# 运行测试（12 个测试文件，243 个用例）
+# 运行 Demo（LLM Agent：自由模式本地页 / 两阶段规划真实百度）
+python examples/llm_agent_demo.py
+python examples/llm_baidu_demo.py
+
+# 运行测试（14 个测试文件，286 个用例）
 pytest
 ```
 
@@ -81,7 +85,7 @@ pytest
 | V0.1 | 执行层：Browser Tool + Snapshot + Observation + Schema | ✅ 完成 |
 | V0.2 | Agent Loop：规则驱动 Planner + 执行契约加固 | ✅ 完成 |
 | V0.3 | 接入 LLM：LLM Planner | ✅ 完成 |
-| V0.4 | Reflection：错误恢复与重试 | 📋 待开始 |
+| V0.4 | Reflection：错误恢复与重试（任务步骤队列已前瞻完成） | 🔶 进行中 |
 | V0.5 | Memory：历史操作与上下文记忆 | 📋 待开始 |
 | V1.0 | 完整 Agentic RPA：登录/查询/下载/上传/Excel 处理 | 🎯 规划中 |
 

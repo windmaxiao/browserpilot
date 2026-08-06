@@ -36,6 +36,7 @@ browserpilot/
     │
     ├── agent/
     │   ├── __init__.py
+    │   ├── logging.py                  #   setup_logging（控制台 + logs/ 按天滚动文件）
     │   │
     │   ├── schema/                    # 【数据模型层】— 无外部依赖，纯 dataclass
     │   │   ├── __init__.py
@@ -45,15 +46,16 @@ browserpilot/
     │   │
     │   ├── browser/                   # 【浏览器执行层】— Playwright 封装
     │   │   ├── __init__.py
-    │   │   ├── playwright.py          #   BrowserTool + BrowserManager
-    │   │   └── snapshot.py            #   SnapshotGenerator（页面→Snapshot）
+    │   │   ├── playwright.py          #   BrowserTool + BrowserManager（新标签页跟随）
+    │   │   └── snapshot.py            #   SnapshotGenerator（页面→Snapshot，关闭防御）
     │   │
     │   ├── core/                      # 【Agent 循环核心】— 编排层
     │   │   ├── __init__.py
-    │   │   ├── agent.py               #   Agent 主循环
+    │   │   ├── agent.py               #   Agent 主循环（步骤/自由双模式 + 异常防护）
     │   │   ├── executor.py            #   Action → BrowserTool 翻译层
     │   │   ├── observer.py            #   SnapshotGenerator 的 Agent 包装
-    │   │   └── planner.py             #   Planner 基类 + RuleBasedPlanner（8 条规则）+ LLMPlanner
+    │   │   └── planner.py             #   Planner 基类 + RuleBasedPlanner（8 条规则）
+    │   │                               #   + LLMPlanner + TaskPlanner（两阶段）+ TaskStep/TaskQueue
     │   │
     │   ├── llm/                       # 【LLM 客户端层】（V0.3）
     │   │   ├── __init__.py
@@ -292,23 +294,20 @@ class Agent:
 
 | 方法 | 说明 |
 |------|------|
-| `run(goal)` | 完整 Agent 循环（Observe→Plan→Execute→Record） |
+| `run(goal)` | 完整 Agent 循环：先尝试 `planner.decompose()`，成功走步骤模式，否则走自由模式 |
 | `step(action)` | 单步执行（手动/调试模式） |
 | `observe()` | 获取当前页面 Snapshot |
 
-**run() 循环流程：**
-1. Observe — 调用 Observer 获取 Snapshot
-2. Plan — 调用 Planner 生成下一步 Action
-3. Check done — action == "done" 则结束
-4. Execute — 调用 Executor 执行 Action
-5. Record — 记录 (step, action, observation) 到 history
-6. Check failure — 失败则返回错误 Observation
-7. 循环至 max_steps 或 done
+**run() 两种模式（V0.4 前瞻）：**
+- **步骤模式**（Planner.decompose 返回步骤队列）：按 `TaskQueue` 逐项执行；`wait` 步骤由框架直接 `wait(ms)`、`verify` 步骤由框架校验 URL/文本，**均不经过 LLM**；`action` 步骤经 `plan_step()` 携带「当前步骤 + 剩余步骤」上下文分步决策；队列耗尽即任务完成（无需 LLM 输出 done）
+- **自由模式**（拆解失败 / Planner 不支持）：Observe→Plan→Execute→Record 循环直到 LLM 输出 done（V0.3 旧行为）
 
 **关键设计决策：**
 - Step 索引从 1 开始
 - 失败即返回（V0.4 才实现 Reflection 重试）
 - Planner 返回 None 表示无法规划
+- **异常防护**：`_safe_observe()` / `_safe_execute()` 捕获浏览器关闭等异常，优雅返回失败 Observation 而非崩溃
+- **停滞检测**：LLM 在 action 步骤中连续 2 次 wait 且页面无变化 → 提前终止；计划内 wait 步骤不计入
 
 #### `executor.py` — Executor（Action → BrowserTool 翻译层）
 
@@ -335,14 +334,16 @@ class Observer:
 | `observe()` | 生成 Snapshot + 检测页面类型 |
 | `observe_simplified()` | 返回简化版 dict（供 LLM 提示词使用） |
 
-#### `planner.py` — Planner（V0.2 规则驱动 + V0.3 LLM 驱动）
+#### `planner.py` — Planner（V0.2 规则驱动 + V0.3 LLM 驱动 + V0.4 前瞻两阶段）
 
 | 类/函数 | 说明 |
 |----|------|
 | `parse_goal(goal)` | 从目标提取 URL / 搜索词 / 点击目标 / 等待条件 → TaskSpec |
-| `Planner` | 基类，`plan()` 抛出 NotImplementedError；`plan_with_history()` 默认转发 plan |
+| `Planner` | 基类，`plan()` 抛出 NotImplementedError；`plan_with_history()` 默认转发 plan；`decompose()` 默认返回 None（自由模式）；`plan_step()` 默认退化为 plan_with_history |
 | `RuleBasedPlanner` | 规则引擎（V0.2 完成）：8 条内置规则 + `add_rule()` 自定义规则优先 |
-| `LLMPlanner` | LLM 规划器（V0.3 完成）：Snapshot 序列化 → 提示词 → 模型输出 → 安全 Action 转换；内容层错误最多一次修复 |
+| `LLMPlanner` | LLM 规划器（V0.3 完成，自由模式）：Snapshot 序列化 → 提示词 → 模型输出 → 安全 Action 转换；内容层错误最多一次修复 |
+| `TaskStep` / `TaskQueue` | 任务步骤数据模型与队列（V0.4 前瞻）：kind ∈ action/wait/verify；wait/verify 由框架直接执行 |
+| `TaskPlanner` | 两阶段规划器（V0.4 前瞻）：`decompose()` 一次 LLM 调用把目标拆成步骤队列 + `plan_step()` 提示词携带「当前步骤 + 剩余步骤」分步决策；拆解失败自动回退自由模式 |
 
 **Goal 语法（parse_goal）：**
 
@@ -425,10 +426,13 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 - ✅ **RuleBasedPlanner 规则引擎（V0.2）**：parse_goal 目标解析（URL/搜索词/点击目标/等待条件）+ 8 条内置规则
 - ✅ **click() page_changed 增强（V0.2）**：URL + 标题 + DOM 指纹三重判定
 - ✅ **执行契约加固（V0.2 阶段 A）**：Action 参数校验完整化、BrowserTool 异常边界统一（wait/scroll 防护）、Snapshot selector CSS 转义与 element_id 生命周期重置、Observation.fail() 显式 data
-- ✅ **LLM 接入（V0.3）**：`LLMClient` 协议 + 错误分类、`MockLLMClient`（无网络测试）、`OpenAILLMClient`（OpenAI 兼容）、`LLMPlanner`（Snapshot 序列化 → 提示词 → 安全 Action 转换，内容层错误一次修复）
+- ✅ **LLM 接入（V0.3）**：`LLMClient` 协议 + 错误分类、`MockLLMClient`（无网络测试）、`OpenAILLMClient`（OpenAI 兼容 + 7 家国内大模型预设）、`LLMPlanner`（Snapshot 序列化 → 提示词 → 安全 Action 转换，内容层错误一次修复）
 - ✅ **安全边界（V0.3）**：模型上下文脱敏（无 selector/HTML/Cookie/截图，URL 敏感参数掩码）、伪造 selector 忽略、幻觉 target_id 拦截
-- ✅ 12 个测试文件，243 个用例（Schema / Executor / Planner / BrowserTool / SnapshotGenerator / Agent 集成 / LLMClient / 序列化 / LLMPlanner）
-- ✅ 4 个 Demo（手动 / 规则 Agent 本地页 / 规则 Agent 百度 / LLM Agent，端到端跑通）
+- ✅ **两阶段任务队列（V0.4 前瞻）**：`TaskPlanner`（`decompose` 拆解目标为步骤队列 + `plan_step` 分步决策）、`TaskStep/TaskQueue`、Agent 双模式（步骤模式/自由模式自动回退）、wait/verify 步骤由框架直接执行（不经过 LLM）、队列耗尽即完成
+- ✅ **异常防护（V0.4 前瞻）**：`_safe_observe()` / `_safe_execute()` 浏览器关闭时优雅失败；停滞检测（LLM 连续 2 次 wait 且页面无变化提前终止）
+- ✅ **工程化增强**：`setup_logging`（控制台 + `logs/` 按天滚动文件）、Snapshot 生成并行化提速（asyncio.gather 双层并发）、新标签页轮询跟随、`.env` 零依赖加载链
+- ✅ 14 个测试文件，286 个用例（Schema / Executor / Planner / BrowserTool / SnapshotGenerator / Agent 集成 / LLMClient / 序列化 / LLMPlanner / Logging / TaskQueue）
+- ✅ 5 个 Demo（手动 / 规则 Agent 本地页 / 规则 Agent 百度 / LLM Agent 自由模式 / LLM Agent 两阶段真实百度，端到端跑通）
 
 ### 已知问题（详见 [待解决问题.md](待解决问题.md)，下表为摘要）
 
@@ -466,7 +470,7 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 | **V0.1** | 执行层：Browser Tool + Snapshot + Observation + Schema | 核心执行框架 | ✅ 完成 |
 | **V0.2** | Agent Loop：规则驱动 Planner + 执行契约加固 | `RuleBasedPlanner` 规则引擎（目标解析：URL/搜索词/点击目标/等待条件 + 8 条内置规则）；Snapshot 不可见元素过滤 + selector CSS 转义 + element_id 生命周期；click() page_changed DOM 指纹检测；Action 参数校验完整化；BrowserTool 异常边界统一 | ✅ 完成 |
 | **V0.3** | 接入 LLM：LLM Planner | `LLMClient` 协议 + 错误分类；`MockLLMClient` + `OpenAILLMClient`；`LLMPlanner`（Snapshot 脱敏序列化 → 提示词 → 安全 Action 转换 + 一次修复）；Agent `plan_with_history()` 传历史 | ✅ 完成 |
-| **V0.4** | Reflection：错误恢复与重试 | Agent 失败重试；循环检测；后退/刷新恢复 | 📋 待开始 |
+| **V0.4** | Reflection：错误恢复与重试 | **已前瞻完成**：任务步骤队列（TaskPlanner decompose→分步执行）、wait/verify 框架直执行、停滞检测、浏览器关闭异常防护；**待做**：Agent 失败重试、后退/刷新恢复、LLM 可重试错误自动重试 | 🔶 进行中 |
 | **V0.5** | Memory：历史操作与上下文记忆 | 摘要式记忆；滑动窗口；上下文压缩 | 📋 待开始 |
 | **V1.0** | 完整 Agentic RPA | 登录/查询/下载/上传/Excel 长流程 | 🎯 规划中 |
 
@@ -484,12 +488,14 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 - **Schema 测试（现有）：** 纯数据类测试，无外部依赖
 - **Executor 测试（现有）：** Mock BrowserTool 验证 dispatch 和参数传递
 - **Planner 测试（现有）：** Mock Snapshot 验证规则匹配与状态推进
-- **BrowserTool 测试（现有）：** AsyncMock Page 对象，覆盖 click() page_changed DOM 指纹、wait()/scroll() 非法参数防护与异常转换
-- **SnapshotGenerator 测试（现有）：** Mock Page 验证可见性过滤、selector 优先级与 CSS 转义、element_id 生命周期
-- **Agent 集成测试（现有）：** Mock Observer/Planner/BrowserTool 验证 run() 全链路（done / 执行失败 / 非法 Action / 最大步数 / LLM 驱动多步）
+- **BrowserTool 测试（现有）：** AsyncMock Page 对象，覆盖 click() page_changed DOM 指纹、wait()/scroll() 非法参数防护与异常转换、新标签页轮询跟随
+- **SnapshotGenerator 测试（现有）：** Mock Page 验证可见性过滤、selector 优先级与 CSS 转义、element_id 生命周期、页面关闭防御
+- **Agent 集成测试（现有）：** Mock Observer/Planner/BrowserTool 验证 run() 全链路（done / 执行失败 / 非法 Action / 最大步数 / LLM 驱动多步 / 停滞检测 / 步骤模式 wait-verify 框架直执行 / TaskPlanner 两阶段完整链路 / 观察异常防护）
 - **LLMClient 测试（现有）：** Mock 客户端响应队列 / 异常注入 / 调用记录；错误分类（可重试 vs 不可重试）；OpenAI 客户端未配 Key 提示
 - **序列化测试（现有）：** 上下文不含 selector/HTML/Cookie、URL 脱敏、元素/文本截断、序列化稳定、element_id 映射、历史窗口
 - **LLMPlanner 测试（现有）：** 合法 Action、幻觉 ID、伪造 selector、非法 action、数组输出、一次修复恢复、连续失败停止、可重试错误不重试
+- **Logging 测试（现有）：** setup_logging 控制台 / 文件 sink 行为
+- **TaskQueue 测试（现有）：** 队列消费顺序、拆解解析（wait 毫秒归一 / verify 参数 / 非法条目过滤）、TaskPlanner 拆解失败回退、plan_step 步骤上下文注入
 
 ### 运行测试
 

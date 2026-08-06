@@ -12,6 +12,7 @@ from pathlib import Path
 from loguru import logger
 
 from agent.browser.playwright import BrowserManager, BrowserTool
+from agent.logging import setup_logging
 
 # ====== 配置 ======
 CONFIG = {
@@ -30,6 +31,8 @@ SCRIPT_DIR = Path(__file__).parent
 
 async def main():
     """RPA 自动化流程"""
+    # 控制台 + logs/ 目录按天滚动文件
+    setup_logging()
     browser_cfg = CONFIG.get("browser", {})
     # biz_cfg = CONFIG.get("business", {})
 

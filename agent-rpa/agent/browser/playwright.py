@@ -16,7 +16,7 @@ import asyncio
 import base64
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from loguru import logger
 from playwright.async_api import Page, Playwright, async_playwright
@@ -43,8 +43,18 @@ class BrowserTool:
     - screenshot()
     """
 
-    def __init__(self, page: Page):
+    def __init__(
+        self,
+        page: Page,
+        on_page_changed: Optional[Callable[[Page], None]] = None,
+    ):
+        """参数:
+            page: 当前活动 Page。
+            on_page_changed: 点击打开新标签页并自动跟随时的回调
+                             （由 BrowserManager 传入，用于同步当前页面）。
+        """
         self._page = page
+        self._on_page_changed = on_page_changed
         logger.debug("BrowserTool 创建 | URL: {}", page.url)
 
     # ── 页面属性 ────────────────────────────────────────────────────
@@ -94,6 +104,7 @@ class BrowserTool:
         - URL 变化
         - 标题变化
         - DOM 指纹变化（元素数 / 文本长度，捕获 SPA 等无导航内容变化）
+        - 点击打开新标签页 → 自动跟随并切换当前页面（target=_blank 链接）
         """
         logger.info("🖱️ click: {}", selector)
         start = time.time()
@@ -103,8 +114,12 @@ class BrowserTool:
             old_url = self._page.url
             old_title = await self._page.title()
             old_fp = await self._page_fingerprint()
+            old_pages = self._current_pages()
             await locator.click(force=force, timeout=timeout)
             await self._smart_wait()
+            new_page = await self._detect_new_page(old_pages)
+            if new_page is not None:
+                return await self._switch_to_page(new_page)
             new_url = self._page.url
             new_title = await self._page.title()
             new_fp = await self._page_fingerprint()
@@ -398,6 +413,61 @@ class BrowserTool:
         except Exception:
             pass
 
+    # ── 新标签页跟随（target=_blank 链接）───────────────────────────────
+
+    def _current_pages(self) -> set:
+        """当前 context 中的所有 Page（异常时返回空集，保持向后兼容）。"""
+        try:
+            return set(self._page.context.pages)
+        except Exception:
+            return set()
+
+    async def _detect_new_page(
+        self, old_pages: set, timeout: float = 3.0
+    ) -> Optional[Page]:
+        """点击后若打开了新标签页则返回该 Page，否则返回 None。
+
+        新标签页创建存在延迟（JS/浏览器行为），故采用轮询等待而非只查一次：
+        百度等站点点击 target=_blank 链接后，新 Page 可能数百毫秒后才出现。
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                pages = self._page.context.pages
+            except Exception:
+                return None
+            for p in pages:
+                if p in old_pages or p is self._page:
+                    continue
+                try:
+                    closed = p.is_closed()
+                    if asyncio.iscoroutine(closed):
+                        closed = await closed
+                except Exception:
+                    closed = False
+                if not closed:
+                    return p
+            await asyncio.sleep(0.2)
+        return None
+
+    async def _switch_to_page(self, page: Page) -> Observation:
+        """跟随新标签页：更新内部引用并通知外部订阅者（BrowserManager）。"""
+        try:
+            await page.wait_for_load_state("load", timeout=5000)
+        except Exception:
+            pass
+        self._page = page
+        if self._on_page_changed:
+            self._on_page_changed(page)
+        title = await self._page.title()
+        logger.info("🖱️ click 打开新标签页，已自动跟随 | URL: {} | title: {}",
+                    self._page.url, title)
+        return Observation.ok(
+            url=self._page.url,
+            title=title,
+            page_changed=True,
+        )
+
 
 # ── Playwright 生命周期管理 ──────────────────────────────────────────
 
@@ -419,6 +489,7 @@ class BrowserManager:
         self._browser = None
         self._context = None
         self._page: Optional[Page] = None
+        self._page_listeners: list = []
         logger.debug("BrowserManager 创建 | headless={} slow_mo={} kwargs={}",
                      headless, slow_mo, launch_kwargs)
 
@@ -503,4 +574,17 @@ class BrowserManager:
         return self._page
 
     def create_tool(self) -> BrowserTool:
-        return BrowserTool(self.page)
+        return BrowserTool(self.page, on_page_changed=self.switch_page)
+
+    def switch_page(self, page: Page) -> None:
+        """切换当前活动页面，并通知所有订阅者（如 SnapshotGenerator）。
+
+        点击 target=_blank 链接自动跟随新标签页时由 BrowserTool 调用。
+        """
+        self._page = page
+        for cb in self._page_listeners:
+            cb(page)
+
+    def subscribe_page(self, callback) -> None:
+        """订阅页面切换事件：跟随新标签页后回调 callback(page)。"""
+        self._page_listeners.append(callback)

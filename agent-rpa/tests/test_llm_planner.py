@@ -147,6 +147,11 @@ class TestPrompts:
         for keyword in ("规划器", "不要添加 Markdown", "元素 ID", "done"):
             assert keyword in SYSTEM_PROMPT
 
+    def test_system_prompt_lists_all_actions(self):
+        """提示词必须包含全部 action 枚举，防止模型输出未知 action（与 schema 同源）。"""
+        for action in VALID_ACTIONS:
+            assert action in SYSTEM_PROMPT
+
     def test_user_prompt_contains_goal_snapshot_history(self):
         snap_view = {"title": "登录页", "elements": []}
         history = [{"action": "goto", "target": None, "target_id": None,
@@ -176,6 +181,34 @@ class TestLLMPlanner:
         assert action.action == "click"
         assert action.params["selector"] == "#btn-login"
         assert client.call_count == 1
+
+    async def test_int_value_coerced_to_str(self):
+        """模型输出 int value（如 wait 5000）→ 强转 str，防止后续切片崩溃"""
+        client = MockLLMClient([{"action": "wait", "value": 5000}])
+        planner = LLMPlanner(client, model="mock", timeout=1000)
+        action = await planner.plan(_snapshot(), "等待五秒")
+        assert action is not None
+        assert action.action == "wait"
+        assert action.value == "5000"
+
+    async def test_prompt_and_response_are_logged(self):
+        """程序与大模型的对话以 DEBUG 级别记录（请求与响应可观测）"""
+        import io
+
+        from loguru import logger
+
+        sink = io.StringIO()
+        logger_id = logger.add(sink, level="DEBUG")
+        try:
+            client = MockLLMClient([{"action": "done"}])
+            planner = LLMPlanner(client, model="mock", timeout=1000)
+            await planner.plan(_snapshot(), "测试目标")
+        finally:
+            logger.remove(logger_id)
+        text = sink.getvalue()
+        assert "LLM 请求" in text
+        assert "LLM 响应" in text
+        assert '"action": "done"' in text
 
     async def test_repair_recovers_within_limit(self):
         client = MockLLMClient([

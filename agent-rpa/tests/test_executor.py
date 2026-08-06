@@ -23,6 +23,7 @@ def mock_tool():
     tool.goto = AsyncMock(
         return_value=Observation.ok(url="https://example.com", title="Example")
     )
+    tool.wait = AsyncMock(return_value=Observation.ok())
     tool.current_url = "https://example.com"
     tool.current_title = AsyncMock(return_value="Example")
     return tool
@@ -58,6 +59,33 @@ async def test_invalid_action(mock_tool):
     obs = await executor.execute(Action(action="unknown"))
     assert obs.is_error is True
     assert "未知动作" in obs.error
+
+
+@pytest.mark.asyncio
+async def test_execute_wait_value_as_ms(mock_tool):
+    """LLM 常用 value 表达等待毫秒数（如 5000）→ 透传为 ms"""
+    executor = Executor(mock_tool)
+    obs = await executor.execute(Action(action="wait", value="5000"))
+    assert obs.success is True
+    mock_tool.wait.assert_awaited_once_with(ms=5000)
+
+
+@pytest.mark.asyncio
+async def test_execute_wait_defaults_to_1000ms(mock_tool):
+    """无 value / params.ms → 默认 1000ms"""
+    executor = Executor(mock_tool)
+    obs = await executor.execute(Action(action="wait"))
+    assert obs.success is True
+    mock_tool.wait.assert_awaited_once_with(ms=1000)
+
+
+@pytest.mark.asyncio
+async def test_execute_wait_params_ms_wins(mock_tool):
+    """params.ms 优先于 value"""
+    executor = Executor(mock_tool)
+    obs = await executor.execute(Action(action="wait", value="5000", params={"ms": 2000}))
+    assert obs.success is True
+    mock_tool.wait.assert_awaited_once_with(ms=2000)
 
 
 # ── _resolve_selector 标签名识别 ──────────────────────────────────

@@ -22,12 +22,15 @@ from agent.core.agent import Agent
 from agent.core.executor import Executor
 from agent.core.observer import Observer
 from agent.core.planner import RuleBasedPlanner
+from agent.logging import setup_logging
 
 SCRIPT_DIR = Path(__file__).parent
 SEARCH_PAGE_URL = (SCRIPT_DIR / "search_page.html").as_uri()
 
 
 async def main():
+    # 控制台 + logs/ 目录按天滚动文件
+    setup_logging()
     # 目标同时包含 URL（触发导航规则）和搜索词（触发搜索规则）
     goal = f"打开 {SEARCH_PAGE_URL} 查找 北京时间"
     logger.info("🎯 目标: {}", goal)

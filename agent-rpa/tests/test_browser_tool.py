@@ -31,6 +31,23 @@ def make_page_mock():
     return page, locator
 
 
+def make_new_tab_page_mock():
+    """构造点击后出现新标签页的 Page Mock（模拟 target=_blank 链接）"""
+    page, locator = make_page_mock()
+    new_page = AsyncMock()
+    new_page.url = "https://baike.baidu.com/item/北京时间"
+    new_page.title = AsyncMock(return_value="北京时间 - 百度百科")
+    new_page.wait_for_load_state = AsyncMock()
+    new_page.is_closed = MagicMock(return_value=False)
+    context = MagicMock(pages=[page])
+    page.context = context
+    # 点击后新标签页出现
+    locator.click = AsyncMock(
+        side_effect=lambda **kw: setattr(context, "pages", [page, new_page])
+    )
+    return page, new_page, locator
+
+
 class TestClickPageChanged:
 
     @pytest.mark.asyncio
@@ -84,6 +101,57 @@ class TestClickPageChanged:
         tool = BrowserTool(page)
         fp = await tool._page_fingerprint()
         assert fp == {}
+
+
+class TestClickFollowNewTab:
+    """点击 target=_blank 链接后自动跟随新标签页（新能力）"""
+
+    @pytest.mark.asyncio
+    async def test_click_follows_new_tab_and_notifies(self):
+        """打开新标签页 → 自动切换 page、通知订阅者、page_changed=True"""
+        page, new_page, _ = make_new_tab_page_mock()
+        page.evaluate = AsyncMock(side_effect=[
+            {"elements": 10, "text_len": 100},
+            {"elements": 10, "text_len": 100},
+        ])
+        switched = []
+        tool = BrowserTool(page, on_page_changed=lambda p: switched.append(p))
+        obs = await tool.click("#baike-link")
+        assert obs.success is True
+        assert obs.page_changed is True
+        assert obs.url == new_page.url
+        assert tool.page is new_page
+        assert switched == [new_page]
+
+    @pytest.mark.asyncio
+    async def test_click_without_new_tab_keeps_page(self):
+        """未打开新标签页 → 页面不切换，走原有 page_changed 判定"""
+        page, locator = make_page_mock()
+        page.context = MagicMock(pages=[page])  # 只有当前页
+        page.evaluate = AsyncMock(side_effect=[
+            {"elements": 10, "text_len": 100},
+            {"elements": 10, "text_len": 100},
+        ])
+        switched = []
+        tool = BrowserTool(page, on_page_changed=lambda p: switched.append(p))
+        obs = await tool.click("#btn")
+        assert obs.success is True
+        assert obs.page_changed is False
+        assert tool.page is page
+        assert switched == []
+
+    @pytest.mark.asyncio
+    async def test_click_when_context_unavailable_still_works(self):
+        """context 不可访问（如 Mock 未配置）时不影响原有逻辑"""
+        page, _ = make_page_mock()
+        page.evaluate = AsyncMock(side_effect=[
+            {"elements": 10, "text_len": 100},
+            {"elements": 15, "text_len": 200},
+        ])
+        tool = BrowserTool(page)
+        obs = await tool.click("#btn")
+        assert obs.success is True
+        assert obs.page_changed is True
 
 
 class TestPageFingerprint:

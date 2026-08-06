@@ -112,14 +112,26 @@ agent-rpa/
 │   │   └── planner.py      # 系统/用户提示词 + Snapshot 序列化 + Action 解析
 │   └── tools/              # (预留) 辅助工具
 │
+├── agent/
+│   ├── __init__.py
+│   ├── logging.py          # setup_logging（控制台 + logs/ 按天滚动文件）
+│   ├── schema/             # Action / Observation / Snapshot 数据模型（无外部依赖）
+│   ├── browser/            # BrowserTool + BrowserManager + SnapshotGenerator
+│   ├── core/               # Agent 主循环 + Executor + Observer + Planner（规则/LLM/两阶段）
+│   ├── llm/                # LLMClient 协议 + Mock + OpenAI 兼容 Provider
+│   ├── prompts/            # 系统/用户提示词 + Snapshot 序列化 + Action 解析
+│   └── tools/              # (预留) 辅助工具
+│
 ├── examples/
 │   ├── manual_demo.py      # 手动模式 Demo —— 完整 RPA 流程（百度搜索+结果保存）
 │   ├── agent_demo.py       # 规则 Agent 模式 Demo —— 本地搜索页
 │   ├── baidu_demo.py       # 规则 Agent 模式 Demo —— 真实百度
-│   ├── llm_agent_demo.py   # LLM Agent 模式 Demo —— 本地搜索页
+│   ├── llm_agent_demo.py   # LLM Agent 自由模式 Demo —— 本地搜索页（LLMPlanner）
+│   ├── llm_baidu_demo.py   # LLM Agent 两阶段 Demo —— 真实百度（TaskPlanner）
+│   ├── check_llm_connectivity.py  # 7 家国内大模型连通性测试
 │   └── search_page.html    # 本地确定性搜索页（agent_demo 使用）
 │
-└── tests/                  # 12 个文件，243 个用例
+└── tests/                  # 14 个文件，286 个用例
     ├── test_action.py                    # Action Schema + 参数校验
     ├── test_observation.py               # Observation Schema
     ├── test_snapshot.py                  # Snapshot Schema + Generator 基础
@@ -128,10 +140,12 @@ agent-rpa/
     ├── test_browser_tool.py              # BrowserTool（click 指纹 / wait / scroll 防护）
     ├── test_snapshot_generator.py        # SnapshotGenerator（selector 转义 / ID 生命周期）
     ├── test_regression_fixed_issues.py   # 已修复问题回归
-    ├── test_agent_integration.py         # Agent 主循环 Mock 集成（含 LLM 驱动）
+    ├── test_agent_integration.py         # Agent 主循环 Mock 集成（含 LLM 驱动/步骤模式）
     ├── test_llm_client.py                # LLMClient 协议 / Mock / 错误分类
     ├── test_prompt_serialization.py      # Snapshot 序列化 / URL 脱敏 / 历史窗口
-    └── test_llm_planner.py               # LLMPlanner 解析 / 一次修复 / 完整链路
+    ├── test_llm_planner.py               # LLMPlanner 解析 / 一次修复 / 完整链路
+    ├── test_logging.py                   # setup_logging 控制台 / 文件
+    └── test_task_queue.py                # TaskStep / TaskQueue / 拆解解析 / TaskPlanner
 ```
 
 ## V0.2 规则驱动 Agent Loop
@@ -254,6 +268,6 @@ pytest
 | V0.1 | 执行层：Browser Tool + Snapshot + Observation + Schema | ✅ 完成 |
 | V0.2 | Agent Loop：规则驱动 Planner + 执行契约加固 | ✅ 完成 |
 | V0.3 | 接入 LLM：LLM Planner（LLMClient 抽象 + LLMPlanner + 安全序列化 + OpenAI Provider） | ✅ 完成 |
-| V0.4 | Reflection：错误恢复与重试 | 📋 待开始 |
+| V0.4 | Reflection：错误恢复与重试（任务步骤队列 / 停滞检测 / 异常防护已前瞻完成） | 🔶 进行中 |
 | V0.5 | Memory：历史操作与上下文记忆 | 📋 待开始 |
 | V1.0 | 完整 Agentic RPA：登录/查询/下载/上传/Excel 处理 | 🎯 规划中 |

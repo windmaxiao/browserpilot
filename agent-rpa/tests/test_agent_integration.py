@@ -221,3 +221,214 @@ async def test_llm_planner_repair_recovers_inside_agent():
     assert obs.success is True
     tool.click.assert_awaited_once()
     assert client.call_count == 3
+
+
+# ── 循环检测：连续等待无效果 → 任务停滞 ─────────────────────────────
+
+@pytest.mark.asyncio
+async def test_consecutive_waits_without_page_change_terminates():
+    """连续 2 次 wait 且页面无变化 → 判定任务停滞并提前终止（Terminal#146-766）"""
+    agent, planner, tool = make_mocks([
+        Action(action="wait", value="5000"),
+        Action(action="wait", value="5000"),
+        done(),  # 不应被执行
+    ])
+    tool.wait = AsyncMock(return_value=Observation.ok(page_changed=False))
+
+    obs = await agent.run("查找 北京时间")
+
+    assert obs.is_error is True
+    assert "任务停滞" in obs.error
+    assert agent.current_step == 2
+    assert len(agent.history) == 2
+    tool.wait.assert_awaited_with(ms=5000)
+    assert tool.wait.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_wait_after_page_change_resets_stagnation_counter():
+    """wait 后页面有变化时不触发停滞，继续正常流程"""
+    agent, planner, tool = make_mocks([
+        Action(action="wait", value="3000"),     # 页面变化 → 计数器清零
+        Action(action="wait", value="3000"),     # 第二次等待仍不触发停滞
+        done(),
+    ])
+    tool.wait = AsyncMock(return_value=Observation.ok(page_changed=True))
+
+    obs = await agent.run("查找 北京时间")
+
+    assert obs.success is True
+    assert obs.data.get("done") is True
+    assert agent.current_step == 3
+    tool.wait.assert_awaited_with(ms=3000)
+    assert tool.wait.await_count == 2
+
+
+# ── 步骤模式（V0.4 前瞻）：任务队列 ─────────────────────────────────
+
+class _StepPlannerStub:
+    """实现 decompose + plan_step 的桩规划器（模拟 TaskPlanner）。"""
+
+    def __init__(self, steps, actions_by_index=None):
+        self._steps = steps
+        self._actions = actions_by_index or {}
+        self.plan_calls: list[int] = []
+
+    async def decompose(self, goal):
+        return self._steps
+
+    async def plan_step(self, snapshot, goal, history, *, steps=None, current_index=None):
+        self.plan_calls.append(current_index)
+        actions = self._actions.get(current_index, [])
+        return actions.pop(0) if actions else None
+
+
+def make_step_agent(steps, actions_by_index=None, snapshot=None):
+    """构造步骤模式的 Agent，返回 (agent, planner, tool)"""
+    from agent.core.planner import TaskStep
+
+    snap = snapshot or Snapshot(title="测试页", url="https://example.com")
+
+    observer = MagicMock()
+    observer.observe = AsyncMock(return_value=snap)
+
+    planner = _StepPlannerStub(steps, actions_by_index)
+
+    tool = MagicMock()
+    tool.wait = AsyncMock(return_value=Observation.ok())
+    tool.click = AsyncMock(return_value=Observation.ok(page_changed=True))
+    tool.input = AsyncMock(return_value=Observation.ok())
+    tool.current_url = "https://example.com"
+    tool.current_title = AsyncMock(return_value="测试页")
+
+    agent = Agent(observer, planner, Executor(tool), max_steps=10)
+    return agent, planner, tool
+
+
+@pytest.mark.asyncio
+async def test_step_mode_waits_executed_by_framework():
+    """wait 步骤由框架直接执行，不调用 planner（LLM 零开销）"""
+    from agent.core.planner import TaskStep
+
+    agent, planner, tool = make_step_agent([
+        TaskStep(description="等待两秒", kind="wait", params={"ms": 2000}),
+        TaskStep(description="点击按钮", kind="action"),
+    ], actions_by_index={1: [Action(action="click", params={"selector": "#btn"})]})
+
+    obs = await agent.run("任务")
+
+    assert obs.success is True
+    assert obs.data.get("done") is True
+    # wait 步骤没有调用 planner
+    assert planner.plan_calls == [1]
+    tool.wait.assert_awaited_once_with(ms=2000)
+    tool.click.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_step_mode_queue_exhausted_returns_done():
+    """队列耗尽（无需 LLM 输出 done）即任务完成"""
+    from agent.core.planner import TaskStep
+
+    agent, planner, tool = make_step_agent([
+        TaskStep(description="点击提交", kind="action"),
+    ], actions_by_index={0: [Action(action="click", params={"selector": "#go"})]})
+
+    obs = await agent.run("任务")
+
+    assert obs.success is True
+    assert obs.data.get("done") is True
+    assert len(agent.history) == 1
+    tool.click.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_step_mode_verify_pass_and_fail():
+    """verify 步骤由框架校验：通过则推进，未通过则失败"""
+    from agent.core.planner import TaskStep
+
+    # 通过：快照含"北京时间"
+    snap_ok = Snapshot(
+        title="北京时间 - 百度百科",
+        url="https://baike.baidu.com",
+    )
+    agent, planner, tool = make_step_agent(
+        [TaskStep(description="验收", kind="verify",
+                  params={"type": "text", "value": "北京时间"})],
+        snapshot=snap_ok,
+    )
+    obs = await agent.run("任务")
+    assert obs.success is True
+    assert planner.plan_calls == []      # verify 步骤不经过 planner
+
+    # 未通过：快照不含验收文本
+    snap_bad = Snapshot(title="别的页面", url="https://example.com")
+    agent2, planner2, tool2 = make_step_agent(
+        [TaskStep(description="验收", kind="verify",
+                  params={"type": "text", "value": "不存在"})],
+        snapshot=snap_bad,
+    )
+    obs2 = await agent2.run("任务")
+    assert obs2.is_error is True
+    assert "步骤验收未通过" in obs2.error
+
+
+@pytest.mark.asyncio
+async def test_observer_exception_returns_graceful_fail():
+    """观察页面抛异常（浏览器被关闭）→ Agent 优雅失败而非崩溃"""
+    observer = MagicMock()
+    observer.observe = AsyncMock(side_effect=Exception("Target closed"))
+    planner = _PlannerStub([done()])
+    tool = MagicMock()
+    tool.current_url = "https://example.com"
+
+    agent = Agent(observer, planner, Executor(tool), max_steps=10)
+    obs = await agent.run("任务")
+
+    assert obs.is_error is True
+    assert "观察页面失败" in obs.error
+
+
+@pytest.mark.asyncio
+async def test_task_planner_drives_two_phase_flow():
+    """TaskPlanner 完整链路：拆解 → goto/input/wait/click 分步执行 → 队列耗尽完成"""
+    from agent.core.planner import TaskPlanner
+
+    snapshot = _search_snapshot()
+    observer = MagicMock()
+    observer.observe = AsyncMock(return_value=snapshot)
+
+    client = MockLLMClient([
+        # 1. 拆解
+        {"steps": [
+            {"description": "打开百度", "kind": "action"},
+            {"description": "输入关键词", "kind": "action"},
+            {"description": "等待页面加载", "kind": "wait", "params": {"ms": 1000}},
+            {"description": "点击结果链接", "kind": "action"},
+        ]},
+        # 2-4. 各 action 步骤的决策
+        {"action": "goto", "value": "https://www.baidu.com"},
+        {"action": "input", "target_id": "e0", "value": "北京时间"},
+        {"action": "click", "target_id": "e1"},
+    ])
+    planner = TaskPlanner(client, model="mock", timeout=1000)
+
+    tool = MagicMock()
+    tool.goto = AsyncMock(return_value=Observation.ok(url="https://www.baidu.com", title="百度", page_changed=True))
+    tool.input = AsyncMock(return_value=Observation.ok())
+    tool.click = AsyncMock(return_value=Observation.ok(page_changed=True))
+    tool.wait = AsyncMock(return_value=Observation.ok())
+    tool.current_url = "https://example.com/search"
+    tool.current_title = AsyncMock(return_value="搜索页")
+
+    agent = Agent(observer, planner, Executor(tool), max_steps=10)
+    obs = await agent.run("打开百度搜索北京时间")
+
+    assert obs.success is True
+    assert obs.data.get("done") is True
+    assert len(agent.history) == 4           # goto/input/wait/click 各记一条
+    tool.goto.assert_awaited_once()
+    tool.input.assert_awaited_once()
+    tool.wait.assert_awaited_once_with(ms=1000)
+    tool.click.assert_awaited_once()
+    assert client.call_count == 4            # 1 次拆解 + 3 次分步决策
