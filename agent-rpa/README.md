@@ -131,7 +131,7 @@ agent-rpa/
 │   ├── check_llm_connectivity.py  # 7 家国内大模型连通性测试
 │   └── search_page.html    # 本地确定性搜索页（agent_demo 使用）
 │
-└── tests/                  # 14 个文件，286 个用例
+└── tests/                  # 14 个文件，303 个用例
     ├── test_action.py                    # Action Schema + 参数校验
     ├── test_observation.py               # Observation Schema
     ├── test_snapshot.py                  # Snapshot Schema + Generator 基础
