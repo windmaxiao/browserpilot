@@ -33,6 +33,10 @@ dev = [
     "pytest-asyncio>=0.21.0",
     "pytest-mock>=3.10.0",
 ]
+# LLM 依赖：仅在需要真实 Provider 时安装
+llm = [
+    "openai>=1.0",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

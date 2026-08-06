@@ -24,7 +24,7 @@ browserpilot/
 ├── 待解决问题.md                       # 已知问题追踪（仅剩未解决项）
 ├── 使用文档.md                         # 面向使用者的安装/运行/规则引擎指南
 ├── V0.2开发计划.md                     # V0.2 开发计划（✅ 已完成）
-├── V0.3开发计划.md                     # V0.3 开发计划（LLM Planner，待开始）
+├── V0.3开发计划.md                     # V0.3 开发计划（✅ 已完成）
 ├── Agentic_RPA_项目规划_V0.1.md        # 原始项目规划文档
 ├── README.md                          # 项目入口 README
 ├── LICENSE                            # Apache License 2.0
@@ -53,12 +53,16 @@ browserpilot/
     │   │   ├── agent.py               #   Agent 主循环
     │   │   ├── executor.py            #   Action → BrowserTool 翻译层
     │   │   ├── observer.py            #   SnapshotGenerator 的 Agent 包装
-    │   │   └── planner.py             #   Planner 基类 + RuleBasedPlanner（8 条规则）
+    │   │   └── planner.py             #   Planner 基类 + RuleBasedPlanner（8 条规则）+ LLMPlanner
     │   │
-    │   ├── llm/                       # 【预留】LLM 模块
-    │   │   └── __init__.py
-    │   ├── prompts/                   # 【预留】提示词模板
-    │   │   └── __init__.py
+    │   ├── llm/                       # 【LLM 客户端层】（V0.3）
+    │   │   ├── __init__.py
+    │   │   ├── base.py                #   LLMClient 协议 + 错误分类
+    │   │   ├── mock.py                #   确定性 Mock 客户端（无网络测试）
+    │   │   └── openai_client.py       #   OpenAI 兼容 Provider 适配器
+    │   ├── prompts/                   # 【提示词层】（V0.3）
+    │   │   ├── __init__.py
+    │   │   └── planner.py             #   系统/用户提示词 + Snapshot 序列化 + Action 解析
     │   └── tools/                     # 【预留】辅助工具
     │       └── __init__.py
     │
@@ -66,9 +70,10 @@ browserpilot/
     │   ├── manual_demo.py             # 手动模式 Demo（直接调用工具）
     │   ├── agent_demo.py              # 规则 Agent 模式 Demo（本地搜索页）
     │   ├── baidu_demo.py              # 规则 Agent 模式 Demo（真实百度）
+    │   ├── llm_agent_demo.py          # LLM Agent 模式 Demo（本地搜索页）
     │   └── search_page.html           # 本地确定性搜索页
     │
-    └── tests/                         # 9 个文件，180 个用例
+    └── tests/                         # 12 个文件，243 个用例
         ├── __init__.py
         ├── test_action.py             # Action Schema + 参数校验
         ├── test_observation.py        # Observation Schema
@@ -78,7 +83,10 @@ browserpilot/
         ├── test_browser_tool.py       # BrowserTool（click 指纹/wait/scroll 防护）
         ├── test_snapshot_generator.py # SnapshotGenerator（selector 转义/ID 生命周期）
         ├── test_regression_fixed_issues.py  # 已修复问题回归
-        └── test_agent_integration.py  # Agent 主循环 Mock 集成
+        ├── test_agent_integration.py  # Agent 主循环 Mock 集成（含 LLM 驱动）
+        ├── test_llm_client.py         # LLMClient 协议 / Mock / 错误分类
+        ├── test_prompt_serialization.py      # Snapshot 序列化 / URL 脱敏 / 历史窗口
+        └── test_llm_planner.py        # LLMPlanner 解析 / 一次修复 / 完整链路
 ```
 
 ---
@@ -327,13 +335,14 @@ class Observer:
 | `observe()` | 生成 Snapshot + 检测页面类型 |
 | `observe_simplified()` | 返回简化版 dict（供 LLM 提示词使用） |
 
-#### `planner.py` — Planner（V0.2 规则驱动）
+#### `planner.py` — Planner（V0.2 规则驱动 + V0.3 LLM 驱动）
 
 | 类/函数 | 说明 |
 |----|------|
 | `parse_goal(goal)` | 从目标提取 URL / 搜索词 / 点击目标 / 等待条件 → TaskSpec |
-| `Planner` | 基类，`plan()` 抛出 NotImplementedError（供 V0.3 LLM Planner 继承） |
+| `Planner` | 基类，`plan()` 抛出 NotImplementedError；`plan_with_history()` 默认转发 plan |
 | `RuleBasedPlanner` | 规则引擎（V0.2 完成）：8 条内置规则 + `add_rule()` 自定义规则优先 |
+| `LLMPlanner` | LLM 规划器（V0.3 完成）：Snapshot 序列化 → 提示词 → 模型输出 → 安全 Action 转换；内容层错误最多一次修复 |
 
 **Goal 语法（parse_goal）：**
 
@@ -357,9 +366,53 @@ class Observer:
 
 ---
 
-## 五、当前状态 (V0.2)
+### 4.4 LLM 层 (`agent/llm/`) 与 Prompts 层 (`agent/prompts/`) — V0.3
 
-### 已完成（V0.1 + V0.2）
+**依赖方向（单向，禁止反向）：**
+```text
+LLMClient / prompts → LLMPlanner → Action
+Snapshot → LLMPlanner
+Executor → BrowserTool
+```
+`llm/` 不导入 Playwright，`BrowserTool` 不导入 LLM 代码。
+
+#### `llm/base.py` — LLMClient 协议 + 错误分类
+
+```python
+class LLMClient(Protocol):
+    async def complete_json(self, *, system_prompt: str, user_prompt: str,
+                            schema: dict, timeout: int) -> dict: ...
+```
+
+- 错误分类：`LLMRetryableError`（`LLMTimeoutError` / `LLMNetworkError` / `LLMRateLimitError`）与不可重试的 `LLMInvalidResponseError`。
+- 异常消息不得包含 API Key、Cookie、完整提示词或敏感页面内容。
+
+#### `llm/mock.py` — MockLLMClient
+
+按预设响应队列返回 dict（可注入异常），记录每次调用参数，用于无网络测试与离线回归。
+
+#### `llm/openai_client.py` — OpenAILLMClient
+
+OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环境变量或显式参数读取；`max_retries=0`（重试交给 V0.4）。
+
+#### `prompts/planner.py` — 序列化 / 提示词 / Action 解析
+
+| 函数 | 说明 |
+|------|------|
+| `serialize_snapshot()` | Snapshot → 模型视图（只含可交互元素，脱敏 + 截断，元素超限标记 `elements_truncated`） |
+| `sanitize_url()` | 移除 fragment；token/session/code 等查询参数值掩码为 `***` |
+| `find_element_by_id()` | 当前 Snapshot 内 `element_id → ElementInfo` 映射（只含可见元素） |
+| `serialize_history()` | 历史压缩为最近窗口摘要（默认 5 条，剔除截图/下载路径/堆栈） |
+| `build_action_schema()` | 模型输出 schema，action 枚举与 `Action.validate()` 同源 |
+| `parse_action_dict()` | 模型 dict → 已验证 Action：伪造 selector 忽略、target_id 必须命中、未知字段丢弃 |
+
+**安全边界（模型不能越界）：** 模型只看到 `target_id` 与语义字段；可执行 selector 只由本地 Snapshot 映射注入；幻觉 ID、非法 action、伪造 selector 一律在进入 Executor 前被拦截。
+
+---
+
+## 五、当前状态 (V0.3)
+
+### 已完成（V0.1 + V0.2 + V0.3）
 
 - ✅ 12 种 Action 类型定义 + 工厂函数 + 参数验证
 - ✅ Observation 统一返回格式
@@ -368,12 +421,14 @@ class Observer:
 - ✅ SnapshotGenerator 从页面提取语义信息（已过滤不可见元素）
 - ✅ Executor Action→BrowserTool 翻译层（支持 target_id 精确定位）
 - ✅ Observer SnapshotGenerator 包装
-- ✅ Agent 主循环框架 (Observe→Plan→Execute→Record)
+- ✅ Agent 主循环框架 (Observe→Plan→Execute→Record)，V0.3 起经 `plan_with_history()` 传入有限历史
 - ✅ **RuleBasedPlanner 规则引擎（V0.2）**：parse_goal 目标解析（URL/搜索词/点击目标/等待条件）+ 8 条内置规则
 - ✅ **click() page_changed 增强（V0.2）**：URL + 标题 + DOM 指纹三重判定
 - ✅ **执行契约加固（V0.2 阶段 A）**：Action 参数校验完整化、BrowserTool 异常边界统一（wait/scroll 防护）、Snapshot selector CSS 转义与 element_id 生命周期重置、Observation.fail() 显式 data
-- ✅ 9 个测试文件，180 个用例（Schema / Executor / Planner / BrowserTool / SnapshotGenerator / Agent 集成）
-- ✅ 2 个 Demo（手动模式 + 规则 Agent 模式，端到端跑通）
+- ✅ **LLM 接入（V0.3）**：`LLMClient` 协议 + 错误分类、`MockLLMClient`（无网络测试）、`OpenAILLMClient`（OpenAI 兼容）、`LLMPlanner`（Snapshot 序列化 → 提示词 → 安全 Action 转换，内容层错误一次修复）
+- ✅ **安全边界（V0.3）**：模型上下文脱敏（无 selector/HTML/Cookie/截图，URL 敏感参数掩码）、伪造 selector 忽略、幻觉 target_id 拦截
+- ✅ 12 个测试文件，243 个用例（Schema / Executor / Planner / BrowserTool / SnapshotGenerator / Agent 集成 / LLMClient / 序列化 / LLMPlanner）
+- ✅ 4 个 Demo（手动 / 规则 Agent 本地页 / 规则 Agent 百度 / LLM Agent，端到端跑通）
 
 ### 已知问题（详见 [待解决问题.md](待解决问题.md)，下表为摘要）
 
@@ -410,7 +465,7 @@ class Observer:
 |------|------|----------|------|
 | **V0.1** | 执行层：Browser Tool + Snapshot + Observation + Schema | 核心执行框架 | ✅ 完成 |
 | **V0.2** | Agent Loop：规则驱动 Planner + 执行契约加固 | `RuleBasedPlanner` 规则引擎（目标解析：URL/搜索词/点击目标/等待条件 + 8 条内置规则）；Snapshot 不可见元素过滤 + selector CSS 转义 + element_id 生命周期；click() page_changed DOM 指纹检测；Action 参数校验完整化；BrowserTool 异常边界统一 | ✅ 完成 |
-| **V0.3** | 接入 LLM：LLM Planner | `LLMPlanner` 类；prompt 模板；Snapshot→LLM→Action 管线 | 📋 待开始 |
+| **V0.3** | 接入 LLM：LLM Planner | `LLMClient` 协议 + 错误分类；`MockLLMClient` + `OpenAILLMClient`；`LLMPlanner`（Snapshot 脱敏序列化 → 提示词 → 安全 Action 转换 + 一次修复）；Agent `plan_with_history()` 传历史 | ✅ 完成 |
 | **V0.4** | Reflection：错误恢复与重试 | Agent 失败重试；循环检测；后退/刷新恢复 | 📋 待开始 |
 | **V0.5** | Memory：历史操作与上下文记忆 | 摘要式记忆；滑动窗口；上下文压缩 | 📋 待开始 |
 | **V1.0** | 完整 Agentic RPA | 登录/查询/下载/上传/Excel 长流程 | 🎯 规划中 |
@@ -418,8 +473,8 @@ class Observer:
 ### 各版本关键关注点
 
 - **V0.2（已完成）备注：** Snapshot 不可见元素过滤、selector CSS 转义与优先级（2.3）、element_id 生命周期重置已完成；`RuleBasedPlanner` 8 条规则已完成（含点击目标、等待条件）；click() page_changed 已含 DOM 指纹；Action 参数校验与 BrowserTool 异常边界已加固。遗留项：bbox 未启用
-- **V0.3 重点：** `llm/` 和 `prompts/` 目录的实现；Agent 的 `run()` 需要切换到 LLM Planner；`observe_simplified()` 需要实际被调用
-- **V0.4 重点：** Agent 的 run() 循环需要增加重试逻辑和循环检测
+- **V0.3（已完成）备注：** `llm/`（base/mock/openai_client）与 `prompts/`（planner.py 序列化/提示词/解析）已实现；`LLMPlanner` 可替换 RuleBasedPlanner（两者可并存，便于离线回归与 fallback）；Agent `run()` 已通过 `plan_with_history()` 传入历史；`observe_simplified()` 暂由 `serialize_snapshot()` 取代（更结构化）。遗留项：真实 Provider 未做人工 smoke test（需 API Key）；Provider 采用 OpenAI 兼容协议，覆盖国内主流厂商预设（DeepSeek/Kimi/智谱/通义/豆包/千帆/星火）
+- **V0.4 重点：** Agent 的 run() 循环需要增加重试逻辑和循环检测；LLM 可重试错误（超时/限流/网络）目前直接返回失败，V0.4 补自动重试
 - **V0.5 重点：** Agent 的 history 管理需要压缩和摘要策略
 
 ---
@@ -431,7 +486,10 @@ class Observer:
 - **Planner 测试（现有）：** Mock Snapshot 验证规则匹配与状态推进
 - **BrowserTool 测试（现有）：** AsyncMock Page 对象，覆盖 click() page_changed DOM 指纹、wait()/scroll() 非法参数防护与异常转换
 - **SnapshotGenerator 测试（现有）：** Mock Page 验证可见性过滤、selector 优先级与 CSS 转义、element_id 生命周期
-- **Agent 集成测试（现有）：** Mock Observer/Planner/BrowserTool 验证 run() 全链路（done / 执行失败 / 非法 Action / 最大步数）
+- **Agent 集成测试（现有）：** Mock Observer/Planner/BrowserTool 验证 run() 全链路（done / 执行失败 / 非法 Action / 最大步数 / LLM 驱动多步）
+- **LLMClient 测试（现有）：** Mock 客户端响应队列 / 异常注入 / 调用记录；错误分类（可重试 vs 不可重试）；OpenAI 客户端未配 Key 提示
+- **序列化测试（现有）：** 上下文不含 selector/HTML/Cookie、URL 脱敏、元素/文本截断、序列化稳定、element_id 映射、历史窗口
+- **LLMPlanner 测试（现有）：** 合法 Action、幻觉 ID、伪造 selector、非法 action、数组输出、一次修复恢复、连续失败停止、可重试错误不重试
 
 ### 运行测试
 

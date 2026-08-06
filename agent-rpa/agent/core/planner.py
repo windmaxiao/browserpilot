@@ -13,12 +13,23 @@ V0.2 使用规则驱动实现（RuleBasedPlanner），V0.3 起可替换为 LLM P
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from loguru import logger
 
+from agent.llm.base import LLMClient, LLMError, LLMRetryableError
+from agent.prompts.planner import (
+    SYSTEM_PROMPT,
+    ActionParseError,
+    build_action_schema,
+    build_user_prompt,
+    parse_action_dict,
+    serialize_history,
+    serialize_snapshot,
+)
 from agent.schema.action import Action, done, goto
 from agent.schema.snapshot import ElementInfo, Snapshot
 
@@ -349,3 +360,95 @@ class RuleBasedPlanner(Planner):
             if kw in cls._normalize(el.text):
                 return True
         return False
+
+
+# ═══════════════════════════════════════════════════════════════
+# LLMPlanner（V0.3）
+# ═══════════════════════════════════════════════════════════════
+
+class LLMPlanner(Planner):
+    """LLM 驱动的规划器（V0.3 实现）。
+
+    ``plan()`` 流程（与 V0.3 计划 2.3 对齐）：
+
+    1. Snapshot → 模型视图（:func:`serialize_snapshot`，脱敏 + 截断）。
+    2. 构建系统 / 用户提示词，用户提示词含最近历史滑动窗口。
+    3. 调用 ``complete_json()`` 请求一个 Action JSON。
+    4. :func:`parse_action_dict` 安全转换为已验证的 Action
+       （target_id 本地映射 selector，忽略模型伪造的 selector）。
+    5. 内容层失败最多发起 ``max_repair_attempts`` 次修复请求；仍失败返回 None。
+
+    网络 / 超时 / 限流等可重试错误不在此处自动重试（留给 V0.4 Reflection），
+    统一记录日志后返回 None，由 Agent 转为失败 Observation。
+    """
+
+    def __init__(
+        self,
+        client: LLMClient,
+        *,
+        model: str = "",
+        max_repair_attempts: int = 1,
+        timeout: int = 30_000,
+        constraints: Optional[list[str]] = None,
+    ):
+        self._client = client
+        self._model = model
+        self._max_repair_attempts = max_repair_attempts
+        self._timeout = timeout
+        self._constraints = list(constraints) if constraints else None
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    @property
+    def max_repair_attempts(self) -> int:
+        return self._max_repair_attempts
+
+    async def plan(self, snapshot: Snapshot, goal: str) -> Optional[Action]:
+        return await self.plan_with_history(snapshot, goal, [])
+
+    async def plan_with_history(
+        self, snapshot: Snapshot, goal: str, history: list
+    ) -> Optional[Action]:
+        view = serialize_snapshot(snapshot)
+        schema = build_action_schema()
+        user_prompt = build_user_prompt(
+            goal, view, serialize_history(history), constraints=self._constraints
+        )
+        raw: Optional[dict] = None
+        for attempt in range(self._max_repair_attempts + 1):
+            try:
+                raw = await self._client.complete_json(
+                    system_prompt=SYSTEM_PROMPT,
+                    user_prompt=user_prompt,
+                    schema=schema,
+                    timeout=self._timeout,
+                )
+            except LLMRetryableError as e:
+                logger.warning("LLM 调用遇到可重试错误，本次放弃: {}", e)
+                return None
+            except LLMError as e:
+                logger.warning("LLM 调用失败: {}", e)
+                return None
+            try:
+                return parse_action_dict(raw, snapshot)
+            except ActionParseError as e:
+                logger.warning(
+                    "Action 解析失败（第 {}/{} 次）: {}",
+                    attempt + 1, self._max_repair_attempts + 1, e,
+                )
+                if attempt >= self._max_repair_attempts:
+                    return None
+                user_prompt = self._build_repair_prompt(user_prompt, raw, str(e))
+        return None
+
+    @staticmethod
+    def _build_repair_prompt(original: str, raw: dict, error: str) -> str:
+        """构造修复请求：附带上次原始输出与校验错误，Snapshot 保持不变。"""
+        return (
+            f"{original}\n\n"
+            "你上次的输出无法通过校验，请重新输出一个合法的 Action JSON。\n"
+            f"上次输出: {json.dumps(raw, ensure_ascii=False)}\n"
+            f"校验错误: {error}"
+        )

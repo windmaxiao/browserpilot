@@ -97,7 +97,8 @@ class Agent:
 
             # 2. Plan
             logger.info("📝 [Step {}/{}] 规划动作...", self._current_step, self._max_steps)
-            action = await self._planner.plan(snapshot, goal)
+            # V0.3 起通过 plan_with_history 传入有限历史（基类默认忽略历史转发 plan）
+            action = await self._planner.plan_with_history(snapshot, goal, self._history)
 
             if action is None:
                 logger.warning("⚠️  [Step {}] 无法规划出有效动作", self._current_step)
