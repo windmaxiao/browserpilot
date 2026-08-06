@@ -137,9 +137,11 @@ class Agent:
                     data={"done": True, "message": action.value or "任务完成"},
                 )
 
-            # 4. Execute
+            # 4. Execute（失败自动重试：机械 1 次 → Reflection 1 次）
             self._log_action(action, self._current_step)
-            observation = await self._safe_execute(action, snapshot)
+            observation, final_action = await self._execute_action_with_retry(
+                action, snapshot, step=self._current_step,
+            )
             if observation is None:
                 return Observation.fail(
                     error=f"在第 {self._current_step} 步动作执行异常（浏览器可能已关闭）",
@@ -148,18 +150,17 @@ class Agent:
             # 5. Record history
             self._history.append({
                 "step": self._current_step,
-                "action": action,
+                "action": final_action,
                 "observation": observation,
             })
 
-            # 6. Check failure
+            # 6. Check failure（重试与 Reflection 均失败 → 中止任务）
             if observation.is_error:
-                logger.warning("❌ [Step {}] 动作失败: {}", self._current_step, observation.error)
-                # TODO(V0.4): 触发 Reflection 重试
+                logger.warning("❌ [Step {}] 动作失败（已重试）: {}", self._current_step, observation.error)
                 return observation
 
             # 7. 循环检测：连续等待且页面无变化 → 任务停滞，提前终止
-            if action.action == "wait" and not observation.page_changed:
+            if final_action.action == "wait" and not observation.page_changed:
                 consecutive_waits += 1
             else:
                 consecutive_waits = 0
@@ -182,9 +183,13 @@ class Agent:
         )
 
     async def _run_with_steps(self, goal: str, steps: list[TaskStep]) -> Observation:
-        """步骤模式：按拆解队列逐项执行；wait / verify 步骤由框架直接处理。"""
+        """步骤模式：按拆解队列逐项执行；wait / verify 步骤由框架直接处理。
+
+        步骤模式不做连续 wait 停滞检测：队列必然推进（成功即消费一步），
+        且有 max_steps 上限兜底；计划内的等待（等待加载/固定延时）是用户
+        明确要求的合法动作，不应误判停滞（自由模式才保留该检测）。
+        """
         queue = TaskQueue(steps)
-        consecutive_waits = 0
         logger.info(
             "🧠 Agent 启动（步骤模式）| 目标: {} | 共 {} 步",
             goal, len(queue),
@@ -265,9 +270,11 @@ class Agent:
                     data={"done": True, "message": "任务完成"},
                 )
 
-            # 4. Execute
+            # 4. Execute（失败自动重试：机械 1 次 → Reflection 1 次）
             self._log_action(action, self._current_step)
-            observation = await self._safe_execute(action, snapshot)
+            observation, final_action = await self._execute_action_with_retry(
+                action, snapshot, step=self._current_step,
+            )
             if observation is None:
                 return Observation.fail(
                     error=f"在第 {self._current_step} 步动作执行异常（浏览器可能已关闭）",
@@ -276,33 +283,17 @@ class Agent:
             # 5. Record history
             self._history.append({
                 "step": self._current_step,
-                "action": action,
+                "action": final_action,
                 "observation": observation,
             })
 
-            # 6. Check failure
+            # 6. Check failure（重试与 Reflection 均失败 → 中止任务）
             if observation.is_error:
-                logger.warning("❌ [Step {}] 动作失败: {}", self._current_step, observation.error)
+                logger.warning("❌ [Step {}] 动作失败（已重试）: {}", self._current_step, observation.error)
                 return observation
 
             # 7. 推进队列（wait 步骤已在上面单独 pop；此处只推进 action/verify 已通过）
             queue.pop()
-
-            # 8. 停滞检测：仅统计 LLM 在 action 步骤中的即兴 wait，
-            #    计划内的 wait 步骤由框架执行，不计入（避免误伤合法等待）。
-            if action.action == "wait" and not observation.page_changed:
-                consecutive_waits += 1
-            else:
-                consecutive_waits = 0
-            if consecutive_waits >= 2:
-                logger.warning(
-                    "⚠️ [Step {}] 连续 {} 次等待且页面无变化，判定任务停滞",
-                    self._current_step, consecutive_waits,
-                )
-                return Observation.fail(
-                    error="任务停滞：连续等待且页面无变化",
-                    url=snapshot.url,
-                )
 
             logger.info("✅ [Step {}] 成功 | URL: {}", self._current_step, observation.url)
 
@@ -365,6 +356,57 @@ class Agent:
         except Exception as e:
             logger.warning("⚠️  动作执行异常（浏览器可能已关闭）: {}", e)
             return None
+
+    async def _execute_action_with_retry(
+        self,
+        action: Action,
+        snapshot: Optional[Snapshot],
+        *,
+        step: int,
+    ) -> tuple[Optional[Observation], Action]:
+        """执行动作并处理失败重试（V0.4 Reflection）。
+
+        策略（用户确认）：
+        1. 首次执行；
+        2. 失败 → 机械重试 1 次（处理瞬时错误，如元素刚渲染）；
+        3. 仍失败 → Reflection：Planner 分析失败原因给出替代动作并执行 1 次；
+        4. 仍失败 → 返回最后一次失败 Observation（上层中止任务）。
+
+        Returns:
+            (observation, final_action)。observation 为 None 表示浏览器关闭等致命异常；
+            final_action 为最终实际执行的动作（Reflection 后可能不同于原动作）。
+        """
+        # 1. 首次执行
+        observation = await self._safe_execute(action, snapshot)
+        if observation is None or not observation.is_error:
+            return observation, action
+
+        # 2. 机械重试 1 次
+        logger.warning("🔁 [Step {}] 执行失败: {} → 机械重试", step, observation.error)
+        retry = await self._safe_execute(action, snapshot)
+        if retry is None:
+            return None, action
+        if not retry.is_error:
+            logger.info("✅ [Step {}] 机械重试成功", step)
+            return retry, action
+
+        # 3. Reflection：让 Planner 分析失败原因并给出替代动作
+        logger.warning("🔁 [Step {}] 机械重试仍失败: {} → 进入 Reflection", step, retry.error)
+        reflect_fn = getattr(self._planner, "reflect", None)
+        if reflect_fn is None:
+            logger.warning("⚠️  [Step {}] Planner 不支持 Reflection，放弃该步", step)
+            return retry, action
+        reflect_action = await reflect_fn(
+            snapshot, self._goal, self._history, action, retry.error or ""
+        )
+        if reflect_action is None:
+            logger.warning("⚠️  [Step {}] Reflection 无替代动作，放弃该步", step)
+            return retry, action
+        self._log_action(reflect_action, step)
+        reflect_obs = await self._safe_execute(reflect_action, snapshot)
+        if reflect_obs is None:
+            return None, reflect_action
+        return reflect_obs, reflect_action
 
     def _log_action(self, action: Action, step: int) -> None:
         """记录 Action 摘要（value 可能为 int，统一转字符串防切片崩溃）。"""

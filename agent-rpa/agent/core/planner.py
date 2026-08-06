@@ -13,6 +13,7 @@ V0.2 使用规则驱动实现（RuleBasedPlanner），V0.3 起可替换为 LLM P
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass, field
@@ -143,6 +144,22 @@ class Planner:
         规划器（TaskPlanner）覆盖本方法，将当前步骤与剩余步骤注入提示词。
         """
         return await self.plan_with_history(snapshot, goal, history)
+
+    async def reflect(
+        self,
+        snapshot: Snapshot,
+        goal: str,
+        history: list,
+        action: Action,
+        error: str,
+    ) -> Optional[Action]:
+        """失败反思（V0.4 Reflection）：分析失败原因并给出替代动作。
+
+        默认返回 None 表示不支持 Reflection；支持该能力的规划器
+        （LLMPlanner / TaskPlanner）覆盖本方法。Agent 在机械重试失败后调用，
+        得到替代动作则再执行一次，否则中止任务。
+        """
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -397,13 +414,12 @@ class LLMPlanner(Planner):
 
     1. Snapshot → 模型视图（:func:`serialize_snapshot`，脱敏 + 截断）。
     2. 构建系统 / 用户提示词，用户提示词含最近历史滑动窗口。
-    3. 调用 ``complete_json()`` 请求一个 Action JSON。
+    3. 调用 ``complete_json()`` 请求一个 Action JSON（可重试错误指数退避自动重试，V0.4）。
     4. :func:`parse_action_dict` 安全转换为已验证的 Action
        （target_id 本地映射 selector，忽略模型伪造的 selector）。
     5. 内容层失败最多发起 ``max_repair_attempts`` 次修复请求；仍失败返回 None。
 
-    网络 / 超时 / 限流等可重试错误不在此处自动重试（留给 V0.4 Reflection），
-    统一记录日志后返回 None，由 Agent 转为失败 Observation。
+    失败反思：:meth:`reflect` 分析动作失败原因并给出替代动作（V0.4 Reflection）。
     """
 
     def __init__(
@@ -414,12 +430,16 @@ class LLMPlanner(Planner):
         max_repair_attempts: int = 1,
         timeout: int = 30_000,
         constraints: Optional[list[str]] = None,
+        llm_retries: int = 3,
+        llm_retry_delay: float = 0.5,
     ):
         self._client = client
         self._model = model
         self._max_repair_attempts = max_repair_attempts
         self._timeout = timeout
         self._constraints = list(constraints) if constraints else None
+        self._llm_retries = llm_retries
+        self._llm_retry_delay = llm_retry_delay
 
     @property
     def model(self) -> str:
@@ -428,6 +448,44 @@ class LLMPlanner(Planner):
     @property
     def max_repair_attempts(self) -> int:
         return self._max_repair_attempts
+
+    async def _call_llm_with_retry(
+        self, *, system_prompt: str, user_prompt: str, schema: dict,
+    ) -> Optional[dict]:
+        """调用 LLM；可重试错误（超时/限流/网络）指数退避自动重试（V0.4）。
+
+        仍失败（或不可重试错误）时返回 None，由调用方决定放弃/修复。
+        """
+        for attempt in range(self._llm_retries):
+            try:
+                logger.debug(
+                    "🧠 LLM 请求（模型: {} | 第 {} 次）\n--- system ---\n{}\n--- user ---\n{}",
+                    self._model, attempt + 1, system_prompt, user_prompt,
+                )
+                raw = await self._client.complete_json(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    schema=schema,
+                    timeout=self._timeout,
+                )
+                logger.debug("🤖 LLM 响应: {}", json.dumps(raw, ensure_ascii=False))
+                return raw
+            except LLMRetryableError as e:
+                if attempt >= self._llm_retries - 1:
+                    logger.warning(
+                        "LLM 调用重试 {} 次仍失败（可重试错误）: {}", self._llm_retries, e,
+                    )
+                    return None
+                delay = self._llm_retry_delay * (2 ** attempt)
+                logger.warning(
+                    "🔁 LLM 可重试错误（第 {}/{} 次）: {} → {}s 后重试",
+                    attempt + 1, self._llm_retries, e, delay,
+                )
+                await asyncio.sleep(delay)
+            except LLMError as e:
+                logger.warning("LLM 调用失败（不可重试）: {}", e)
+                return None
+        return None
 
     async def plan(self, snapshot: Snapshot, goal: str) -> Optional[Action]:
         return await self.plan_with_history(snapshot, goal, [])
@@ -440,26 +498,12 @@ class LLMPlanner(Planner):
         user_prompt = build_user_prompt(
             goal, view, serialize_history(history), constraints=self._constraints
         )
-        raw: Optional[dict] = None
+        raw = await self._call_llm_with_retry(
+            system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt, schema=schema,
+        )
+        if raw is None:
+            return None
         for attempt in range(self._max_repair_attempts + 1):
-            try:
-                logger.debug(
-                    "🧠 LLM 请求（模型: {} | 第 {} 次）\n--- system ---\n{}\n--- user ---\n{}",
-                    self._model, attempt + 1, SYSTEM_PROMPT, user_prompt,
-                )
-                raw = await self._client.complete_json(
-                    system_prompt=SYSTEM_PROMPT,
-                    user_prompt=user_prompt,
-                    schema=schema,
-                    timeout=self._timeout,
-                )
-                logger.debug("🤖 LLM 响应: {}", json.dumps(raw, ensure_ascii=False))
-            except LLMRetryableError as e:
-                logger.warning("LLM 调用遇到可重试错误，本次放弃: {}", e)
-                return None
-            except LLMError as e:
-                logger.warning("LLM 调用失败: {}", e)
-                return None
             try:
                 return parse_action_dict(raw, snapshot)
             except ActionParseError as e:
@@ -470,6 +514,11 @@ class LLMPlanner(Planner):
                 if attempt >= self._max_repair_attempts:
                     return None
                 user_prompt = self._build_repair_prompt(user_prompt, raw, str(e))
+                raw = await self._call_llm_with_retry(
+                    system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt, schema=schema,
+                )
+                if raw is None:
+                    return None
         return None
 
     @staticmethod
@@ -482,6 +531,48 @@ class LLMPlanner(Planner):
             f"上次输出: {json.dumps(raw, ensure_ascii=False)}\n"
             f"校验错误: {error}"
         )
+
+    async def reflect(
+        self,
+        snapshot: Snapshot,
+        goal: str,
+        history: list,
+        action: Action,
+        error: str,
+    ) -> Optional[Action]:
+        """失败反思（V0.4 Reflection）：分析失败原因并给出替代动作。
+
+        替代动作同样经安全转换（伪造 selector 忽略、幻觉 ID 拦截）；
+        解析失败不再发起修复，直接返回 None 交由 Agent 中止任务。
+        """
+        view = serialize_snapshot(snapshot)
+        schema = build_action_schema()
+        base = build_user_prompt(
+            goal, view, serialize_history(history), constraints=self._constraints
+        )
+        failed = {
+            "action": action.action,
+            "target": action.target,
+            "value": action.value,
+            "target_id": action.target_id,
+        }
+        user_prompt = (
+            f"{base}\n\n"
+            f"你刚执行的动作失败了：{json.dumps(failed, ensure_ascii=False)}\n"
+            f"失败原因：{error}\n"
+            "请分析原因并输出下一个动作。可以直接原样重试该动作，也可以更换目标或方式；"
+            "若你认为任务已无法继续，输出 {\"action\": \"done\"}。"
+        )
+        raw = await self._call_llm_with_retry(
+            system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt, schema=schema,
+        )
+        if raw is None:
+            return None
+        try:
+            return parse_action_dict(raw, snapshot)
+        except ActionParseError as e:
+            logger.warning("Reflection 输出无法解析: {}", e)
+            return None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -582,16 +673,76 @@ DECOMPOSE_PROMPT = """你是网页自动化任务拆解器。把用户目标拆�
 - 每个 action 步骤必须能在**一个原子动作**内完成；一个动作做不完的（如"输入并提交"）拆成两步。
 - "打开/访问 URL"拆为 goto 步骤（params 给 url）；"搜索/查找 X"拆为「输入关键词」+「点击搜索/提交」两步。
 - 明确写出的点击目标（如"点击「北京时间 - 百度百科」链接"）拆为 click 步骤，description 写清点击什么。
-- "等待页面加载完成""等待五秒"等表述拆为 wait 步骤，并在 params.ms 给出毫秒数。
+- "等待页面加载完成""等待五秒"等含"等待/延时"字样的步骤，**一律**拆为 wait 步骤（kind="wait"，params={"ms": 毫秒数}），绝不能拆成 action。
 - "关闭浏览器/退出/结束"由调用方负责，**不要拆出这类步骤**。
 - 最后一步通常是 verify（如"页面出现'北京时间'"），用于确认任务达成。
 只输出符合 schema 的 JSON 对象（steps 数组），不要 Markdown。"""
+
+
+# 中文数字 → 数值（用于"等待五秒"这类描述）
+_CN_DIGITS = {
+    "一": 1, "两": 2, "二": 2, "三": 3, "四": 4,
+    "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+}
+
+# 等待语义关键词：命中即视为"应拆为 wait 步骤"
+_WAIT_KEYWORDS = ("等待", "延时", "延迟", "wait")
+
+# 等待 + 中文数字秒（如"等待五秒"）
+_CN_SEC_RE = re.compile(r"[一两二三四五六七八九十]\s*秒")
+# 等待 + 阿拉伯数字（秒/毫秒）
+_NUM_UNIT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(秒|s|毫秒|ms)")
+
+
+def _extract_wait_ms(description: str) -> Optional[int]:
+    """从步骤描述中提取等待毫秒数；无法提取返回 None。
+
+    支持：阿拉伯数字（秒/毫秒）、中文数字（秒）。
+    """
+    text = description.lower()
+    m = _NUM_UNIT_RE.search(text)
+    if m:
+        num = float(m.group(1))
+        return int(num * 1000) if m.group(2) in ("秒", "s") else int(num)
+    m = _CN_SEC_RE.search(text)
+    if m:
+        return _CN_DIGITS[m.group(0)[0]] * 1000
+    return None
+
+
+def _looks_like_wait(description: str) -> bool:
+    """判断步骤描述是否含等待语义（框架兜底识别）。"""
+    return any(k in description.lower() for k in _WAIT_KEYWORDS)
+
+
+def _normalize_wait_steps(steps: list[TaskStep]) -> list[TaskStep]:
+    """框架兜底：把含等待语义却被拆成 action 的步骤纠正为 wait 类型。
+
+    拆解 LLM 有时不遵守「等待一律拆为 wait」的约束（如把"等待五秒"拆成
+    action），导致等待也走 LLM 决策、多一次调用。此处按描述关键词纠正：
+    命中等待语义 → kind 强制为 wait，并提取毫秒数（无数字时默认 1000ms）。
+    已正确拆为 wait / verify 的步骤不受影响。
+    """
+    result: list[TaskStep] = []
+    for step in steps:
+        if step.kind == "action" and _looks_like_wait(step.description):
+            ms = _extract_wait_ms(step.description)
+            result.append(TaskStep(
+                description=step.description, kind="wait",
+                params={"ms": ms if ms is not None else 1000},
+            ))
+            logger.debug("拆解纠正: 「{}」 action → wait ({}ms)", step.description,
+                         ms if ms is not None else 1000)
+        else:
+            result.append(step)
+    return result
 
 
 def parse_decompose_response(raw: Optional[dict], goal: str) -> Optional[list[TaskStep]]:
     """将 LLM 拆解输出安全转换为 TaskStep 列表。
 
     无效 / 非法 kind / 空描述条目直接丢弃；全部无效时返回 None（上层回退单步骤模式）。
+    解析后统一执行等待语义纠正（_normalize_wait_steps），不依赖 LLM 遵守约束。
     """
     if not raw:
         return None
@@ -618,13 +769,18 @@ def parse_decompose_response(raw: Optional[dict], goal: str) -> Optional[list[Ta
             vtype = str(params.get("type", "text")).strip() or "text"
             params = {"type": vtype, "value": str(params.get("value", "")).strip()}
         steps.append(TaskStep(description=description, kind=kind, params=params))
-    return steps or None
+    if not steps:
+        return None
+    return _normalize_wait_steps(steps)
 
 
-class TaskPlanner(Planner):
+class TaskPlanner(LLMPlanner):
     """两阶段规划器（V0.4 前瞻）：目标 → 步骤队列 → 按步骤规划。
 
-    与 :class:`LLMPlanner` 的区别：
+    继承 :class:`LLMPlanner`：LLM 可重试错误指数退避重试、失败反思
+    （:meth:`reflect`）、Action 修复等能力直接复用。
+
+    与 LLMPlanner 的区别：
     - ``decompose()`` 先把目标拆解为步骤队列（一次 LLM 调用）。
     - ``plan_step()`` 的提示词携带「当前步骤 + 剩余步骤」，让 LLM 聚焦
       完成当前步骤，而不是对着整个目标即兴发挥（消除反复 wait 的空转）。
@@ -634,44 +790,15 @@ class TaskPlanner(Planner):
     （等价于旧 LLMPlanner 行为），保证可用性。
     """
 
-    def __init__(
-        self,
-        client: LLMClient,
-        *,
-        model: str = "",
-        max_repair_attempts: int = 1,
-        timeout: int = 30_000,
-        constraints: Optional[list[str]] = None,
-    ):
-        self._client = client
-        self._model = model
-        self._max_repair_attempts = max_repair_attempts
-        self._timeout = timeout
-        self._constraints = list(constraints) if constraints else None
-
-    @property
-    def model(self) -> str:
-        return self._model
-
     async def decompose(self, goal: str) -> Optional[list[TaskStep]]:
         """调用 LLM 将目标拆解为步骤列表；失败 / 无效返回 None（回退单步骤）。"""
-        try:
-            logger.debug(
-                "🧠 任务拆解请求（模型: {}）\n--- system ---\n{}\n--- user ---\n目标: {}",
-                self._model, DECOMPOSE_PROMPT, goal,
-            )
-            raw = await self._client.complete_json(
-                system_prompt=DECOMPOSE_PROMPT,
-                user_prompt=f"用户目标：{goal}\n请把目标拆解为有序步骤。",
-                schema=DECOMPOSE_SCHEMA,
-                timeout=self._timeout,
-            )
-            logger.debug("🤖 拆解响应: {}", json.dumps(raw, ensure_ascii=False))
-        except LLMRetryableError as e:
-            logger.warning("任务拆解遇到可重试错误，本次放弃: {}", e)
-            return None
-        except LLMError as e:
-            logger.warning("任务拆解失败: {}", e)
+        raw = await self._call_llm_with_retry(
+            system_prompt=DECOMPOSE_PROMPT,
+            user_prompt=f"用户目标：{goal}\n请把目标拆解为有序步骤。",
+            schema=DECOMPOSE_SCHEMA,
+        )
+        if raw is None:
+            logger.warning("任务拆解失败（LLM 未返回结果），回退为单步骤模式")
             return None
 
         steps = parse_decompose_response(raw, goal)
@@ -721,26 +848,12 @@ class TaskPlanner(Planner):
                 )
 
         user_prompt = context
-        raw: Optional[dict] = None
+        raw = await self._call_llm_with_retry(
+            system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt, schema=schema,
+        )
+        if raw is None:
+            return None
         for attempt in range(self._max_repair_attempts + 1):
-            try:
-                logger.debug(
-                    "🧠 LLM 请求（模型: {} | 第 {} 次）\n--- system ---\n{}\n--- user ---\n{}",
-                    self._model, attempt + 1, SYSTEM_PROMPT, user_prompt,
-                )
-                raw = await self._client.complete_json(
-                    system_prompt=SYSTEM_PROMPT,
-                    user_prompt=user_prompt,
-                    schema=schema,
-                    timeout=self._timeout,
-                )
-                logger.debug("🤖 LLM 响应: {}", json.dumps(raw, ensure_ascii=False))
-            except LLMRetryableError as e:
-                logger.warning("LLM 调用遇到可重试错误，本次放弃: {}", e)
-                return None
-            except LLMError as e:
-                logger.warning("LLM 调用失败: {}", e)
-                return None
             try:
                 return parse_action_dict(raw, snapshot)
             except ActionParseError as e:
@@ -751,15 +864,9 @@ class TaskPlanner(Planner):
                 if attempt >= self._max_repair_attempts:
                     return None
                 user_prompt = self._build_repair_prompt(user_prompt, raw, str(e))
+                raw = await self._call_llm_with_retry(
+                    system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt, schema=schema,
+                )
+                if raw is None:
+                    return None
         return None
-
-    @staticmethod
-    def _build_repair_prompt(original: str, raw: dict, error: str) -> str:
-        """构造修复请求：附带上次原始输出与校验错误，Snapshot 保持不变。"""
-        return (
-            f"{original}\n\n"
-            "你上次的输出无法通过校验，请重新输出一个合法的 Action JSON。\n"
-            f"可用 action 枚举: {', '.join(sorted(VALID_ACTIONS))}\n"
-            f"上次输出: {json.dumps(raw, ensure_ascii=False)}\n"
-            f"校验错误: {error}"
-        )

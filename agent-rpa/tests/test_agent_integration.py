@@ -432,3 +432,85 @@ async def test_task_planner_drives_two_phase_flow():
     tool.wait.assert_awaited_once_with(ms=1000)
     tool.click.assert_awaited_once()
     assert client.call_count == 4            # 1 次拆解 + 3 次分步决策
+
+
+# ── V0.4 前瞻：失败重试（机械 1 次 → Reflection 1 次 → 中止） ────────
+
+@pytest.mark.asyncio
+async def test_mechanical_retry_recovers():
+    """执行失败后机械重试 1 次成功 → 任务继续并完成"""
+    agent, planner, tool = make_mocks([
+        Action(action="click", params={"selector": "#btn"}),
+        done(),
+    ])
+    tool.click = AsyncMock(side_effect=[
+        Observation.fail("元素暂时不可见"),
+        Observation.ok(page_changed=True),
+    ])
+
+    obs = await agent.run("点击按钮")
+
+    assert obs.success is True
+    assert tool.click.await_count == 2   # 首次失败 + 机械重试成功
+    assert len(agent.history) == 1       # 成功动作只记录一次
+
+
+@pytest.mark.asyncio
+async def test_reflection_recovers_after_mechanical_failure():
+    """机械重试失败后，Reflection 给出替代动作并成功 → 任务继续"""
+    agent, planner, tool = make_mocks([
+        Action(action="click", params={"selector": "#btn"}),
+        done(),
+    ])
+    tool.click = AsyncMock(side_effect=[
+        Observation.fail("元素不存在"),      # 首次
+        Observation.fail("元素不存在"),      # 机械重试
+        Observation.ok(page_changed=True),   # Reflection 替代动作
+    ])
+    planner.reflect = AsyncMock(return_value=Action(
+        action="click", params={"selector": "#alt-btn"}
+    ))
+
+    obs = await agent.run("点击按钮")
+
+    assert obs.success is True
+    assert tool.click.await_count == 3   # 首次 + 机械重试 + Reflection 替代动作
+    planner.reflect.assert_awaited_once()
+    assert planner.reflect.call_args.args[3].params["selector"] == "#btn"
+
+
+@pytest.mark.asyncio
+async def test_all_retries_fail_aborts_task():
+    """重试与 Reflection 均失败 → 中止任务并返回失败 Observation"""
+    agent, planner, tool = make_mocks([
+        Action(action="click", params={"selector": "#btn"}),
+        done(),  # 不应被执行
+    ])
+    tool.click = AsyncMock(return_value=Observation.fail("元素不存在"))
+    planner.reflect = AsyncMock(return_value=None)
+
+    obs = await agent.run("点击按钮")
+
+    assert obs.is_error is True
+    assert "元素不存在" in obs.error
+    assert tool.click.await_count == 2   # 首次 + 机械重试，Reflection 放弃后停止
+    planner.reflect.assert_awaited_once()
+    assert len(agent.history) == 1       # 最终失败动作记录一次
+    assert agent.history[0]["observation"].is_error is True
+
+
+@pytest.mark.asyncio
+async def test_planner_without_reflect_only_mechanical_retry():
+    """Planner 不支持 Reflection（基类默认）→ 仅机械重试后中止"""
+    agent, planner, tool = make_mocks([
+        Action(action="click", params={"selector": "#btn"}),
+        done(),
+    ])
+    tool.click = AsyncMock(return_value=Observation.fail("失败"))
+    # planner 是 _PlannerStub，没有 reflect 属性 → 走基类默认（无 reflect 调用）
+
+    obs = await agent.run("点击按钮")
+
+    assert obs.is_error is True
+    assert tool.click.await_count == 2
+    assert len(agent.history) == 1

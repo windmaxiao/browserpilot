@@ -11,7 +11,7 @@ LLM Planner 解析测试（V0.3 阶段 C）
 
 import pytest
 
-from agent.core.planner import LLMPlanner
+from agent.core.planner import LLMPlanner, Planner
 from agent.llm import LLMTimeoutError, MockLLMClient
 from agent.prompts.planner import (
     SYSTEM_PROMPT,
@@ -20,7 +20,7 @@ from agent.prompts.planner import (
     build_user_prompt,
     parse_action_dict,
 )
-from agent.schema.action import VALID_ACTIONS
+from agent.schema.action import VALID_ACTIONS, Action
 from agent.schema.snapshot import ElementInfo, Snapshot
 
 
@@ -230,11 +230,65 @@ class TestLLMPlanner:
         assert await planner.plan(_snapshot(), "点击") is None
         assert client.call_count == 2   # 原请求 + 一次修复，之后停止
 
-    async def test_retryable_error_returns_none_without_retry(self):
-        client = MockLLMClient([LLMTimeoutError("timeout")])
-        planner = LLMPlanner(client, model="mock", max_repair_attempts=1, timeout=1000)
+    async def test_retryable_error_gives_up_after_max_attempts(self):
+        """可重试错误（超时/限流/网络）指数退避重试到上限后返回 None"""
+        client = MockLLMClient([
+            LLMTimeoutError("timeout-1"),
+            LLMTimeoutError("timeout-2"),
+            LLMTimeoutError("timeout-3"),
+        ])
+        planner = LLMPlanner(
+            client, model="mock", max_repair_attempts=1, timeout=1000,
+            llm_retries=3, llm_retry_delay=0,
+        )
         assert await planner.plan(_snapshot(), "点击") is None
-        assert client.call_count == 1   # 可重试错误不自动重试（留给 V0.4）
+        assert client.call_count == 3   # 重试次数全部耗尽
+
+    async def test_retryable_error_auto_retries_then_succeeds(self):
+        """可重试错误自动重试后成功（V0.4 补的自动重试）"""
+        client = MockLLMClient([
+            LLMTimeoutError("timeout"),
+            LLMTimeoutError("timeout"),
+            {"action": "click", "target_id": "e1"},
+        ])
+        planner = LLMPlanner(client, model="mock", timeout=1000, llm_retry_delay=0)
+        action = await planner.plan(_snapshot(), "点击 登录")
+        assert action is not None
+        assert action.action == "click"
+        assert action.params["selector"] == "#btn-login"
+        assert client.call_count == 3
+
+    async def test_reflect_returns_alternative_action(self):
+        """Reflection 分析失败原因并给出替代动作（安全转换）"""
+        client = MockLLMClient([{"action": "click", "target_id": "e1"}])
+        planner = LLMPlanner(client, model="mock", timeout=1000)
+        failed = Action(action="click", target_id="e1",
+                        params={"selector": "#btn-login"})
+        alt = await planner.reflect(_snapshot(), "点击 登录", [], failed, "元素不可见")
+        assert alt is not None
+        assert alt.action == "click"
+        assert alt.params["selector"] == "#btn-login"
+        # Reflection 提示词包含失败动作与失败原因（selector 不出现在上下文）
+        prompt = client.calls[0].user_prompt
+        assert "元素不可见" in prompt
+        assert '"target_id": "e1"' in prompt
+        assert "#btn-login" not in prompt
+
+    async def test_reflect_parse_failure_returns_none(self):
+        """Reflection 输出非法（幻觉 ID）→ 返回 None，不再修复"""
+        client = MockLLMClient([{"action": "click", "target_id": "e99"}])
+        planner = LLMPlanner(client, model="mock", timeout=1000)
+        failed = Action(action="click", target_id="e1",
+                        params={"selector": "#btn-login"})
+        assert await planner.reflect(_snapshot(), "点击", [], failed, "boom") is None
+        assert client.call_count == 1
+
+    async def test_reflect_without_support_returns_none(self):
+        """不支持 Reflection 的规划器（基类默认实现）返回 None，不发起 LLM 调用"""
+        failed = Action(action="click", target_id="e1",
+                        params={"selector": "#btn-login"})
+        p = Planner()
+        assert await p.reflect(_snapshot(), "点击", [], failed, "x") is None
 
     async def test_repair_prompt_contains_original_and_error(self):
         client = MockLLMClient([

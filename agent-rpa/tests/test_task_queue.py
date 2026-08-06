@@ -122,6 +122,65 @@ def test_parse_returns_none_when_all_invalid():
     assert parse_decompose_response("junk", "目标") is None
 
 
+# ── 等待语义框架兜底（LLM 拆错 kind 时纠正为 wait） ──────────────
+
+def test_wait_semantics_action_corrected_to_wait():
+    """描述含等待语义但被拆成 action → 纠正为 wait 并提取毫秒（阿拉伯数字）"""
+    raw = {"steps": [
+        {"description": "等待 5 秒", "kind": "action"},
+        {"description": "等待3s", "kind": "action"},
+        {"description": "等待 2000ms", "kind": "action"},
+    ]}
+    steps = parse_decompose_response(raw, "目标")
+    assert all(s.kind == "wait" for s in steps)
+    assert [s.params["ms"] for s in steps] == [5000, 3000, 2000]
+
+
+def test_wait_semantics_chinese_digits():
+    """中文数字秒（等待五秒）正确提取毫秒"""
+    raw = {"steps": [
+        {"description": "等待五秒", "kind": "action"},
+        {"description": "等待三秒后继续", "kind": "action"},
+    ]}
+    steps = parse_decompose_response(raw, "目标")
+    assert all(s.kind == "wait" for s in steps)
+    assert [s.params["ms"] for s in steps] == [5000, 3000]
+
+
+def test_wait_semantics_without_number_defaults_1000():
+    """无数字的等待（页面加载完成）默认 1000ms"""
+    raw = {"steps": [
+        {"description": "等待页面加载完成", "kind": "action"},
+        {"description": "页面加载完成后等待", "kind": "action"},
+    ]}
+    steps = parse_decompose_response(raw, "目标")
+    assert all(s.kind == "wait" for s in steps)
+    assert [s.params["ms"] for s in steps] == [1000, 1000]
+
+
+def test_explicit_wait_and_verify_steps_unchanged():
+    """已正确拆为 wait / verify 的步骤不受纠正影响"""
+    raw = {"steps": [
+        {"description": "等待五秒", "kind": "wait", "params": {"ms": 5000}},
+        {"description": "页面出现北京时间", "kind": "verify",
+         "params": {"type": "text", "value": "北京时间"}},
+    ]}
+    steps = parse_decompose_response(raw, "目标")
+    assert steps[0].kind == "wait"
+    assert steps[0].params == {"ms": 5000}
+    assert steps[1].kind == "verify"
+
+
+def test_normal_action_steps_not_corrected():
+    """真正的操作步骤（点击/输入）不受等待纠正影响"""
+    raw = {"steps": [
+        {"description": "点击搜索结果中的北京时间链接", "kind": "action"},
+        {"description": "输入关键词", "kind": "action"},
+    ]}
+    steps = parse_decompose_response(raw, "目标")
+    assert all(s.kind == "action" for s in steps)
+
+
 # ═══════════════════════════════════════════════════════════════
 # TaskPlanner
 # ═══════════════════════════════════════════════════════════════
