@@ -110,14 +110,38 @@ agent-rpa/
 │
 ├── examples/
 │   ├── manual_demo.py      # 手动模式 Demo —— 完整 RPA 流程（百度搜索+结果保存）
-│   └── agent_demo.py       # Agent 模式 Demo
+│   ├── agent_demo.py       # 规则 Agent 模式 Demo —— 本地搜索页
+│   ├── baidu_demo.py       # 规则 Agent 模式 Demo —— 真实百度
+│   └── search_page.html    # 本地确定性搜索页（agent_demo 使用）
 │
 └── tests/
-    ├── test_action.py
-    ├── test_observation.py
-    ├── test_snapshot.py
-    └── test_executor.py
+    ├── test_action.py                    # Action Schema + 参数校验
+    ├── test_observation.py               # Observation Schema
+    ├── test_snapshot.py                  # Snapshot Schema + Generator 基础
+    ├── test_executor.py                  # Executor 调度 / target_id 定位
+    ├── test_planner.py                   # RuleBasedPlanner 规则引擎（8 条规则）
+    ├── test_browser_tool.py              # BrowserTool（click 指纹 / wait / scroll 防护）
+    ├── test_snapshot_generator.py        # SnapshotGenerator（selector 转义 / ID 生命周期）
+    ├── test_regression_fixed_issues.py   # 已修复问题回归
+    └── test_agent_integration.py         # Agent 主循环 Mock 集成
 ```
+
+## V0.2 规则驱动 Agent Loop
+
+V0.2 在不接入 LLM 的前提下，打通「Snapshot → RuleBasedPlanner → Action → Executor → BrowserTool」闭环：
+
+- **RuleBasedPlanner** — `parse_goal()` 解析自然语言目标（URL / 搜索词 / 点击目标 / 等待条件），配合 **8 条内置规则** 决策；`add_rule()` 支持注册自定义规则并优先执行。
+- **定位协议** — Snapshot 元素带全局唯一 `element_id`；Action 通过 `target_id` 引用元素，或直接用 `params["selector"]` 精确定位（优先级：`params.selector` > `target_id` > `target` 语义回退）。
+- **Action 参数校验** — `validate()` 覆盖每类动作的必填字段与参数类型（timeout 正整数、bool 参数、scroll direction/amount、wait ms、save_path 类型等），非法 Action 在到达浏览器前被拦截。
+- **执行契约加固** — BrowserTool 所有方法统一返回 `Observation`；`wait()`/`scroll()` 非法参数防护、杜绝 JS 注入；Snapshot selector 经 CSS 转义、`element_id` 每次生成重置。
+
+### 选择器优先级（`_build_selector`）
+
+```text
+data-testid > id > role > aria-label > 标签:has-text() > 标签名
+```
+
+ID 与属性值均经 CSS 转义，`e.g. #a\2e b\3a c`（原始 id 为 `a.b:c`）。
 
 ## 快速开始
 
@@ -152,11 +176,11 @@ pytest
 
 ## 开发路线
 
-| 版本 | 目标 |
-| :--- | :--- |
-| V0.1 | 执行层：Browser Tool + Snapshot + Observation + Schema |
-| V0.2 | Agent Loop：规则驱动 Planner |
-| V0.3 | 接入 LLM：LLM Planner |
-| V0.4 | Reflection：错误恢复与重试 |
-| V0.5 | Memory：历史操作与上下文记忆 |
-| V1.0 | 完整 Agentic RPA：登录/查询/下载/上传/Excel 处理 |
+| 版本 | 目标 | 状态 |
+| :--- | :--- | :--- |
+| V0.1 | 执行层：Browser Tool + Snapshot + Observation + Schema | ✅ 完成 |
+| V0.2 | Agent Loop：规则驱动 Planner + 执行契约加固 | ✅ 完成 |
+| V0.3 | 接入 LLM：LLM Planner | 📋 待开始 |
+| V0.4 | Reflection：错误恢复与重试 | 📋 待开始 |
+| V0.5 | Memory：历史操作与上下文记忆 | 📋 待开始 |
+| V1.0 | 完整 Agentic RPA：登录/查询/下载/上传/Excel 处理 | 🎯 规划中 |

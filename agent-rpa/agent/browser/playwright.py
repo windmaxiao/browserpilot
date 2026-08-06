@@ -13,6 +13,7 @@ Agent 不直接调用 Playwright API，通过本模块间接操作浏览器。
 from __future__ import annotations
 
 import asyncio
+import base64
 import time
 from pathlib import Path
 from typing import Optional
@@ -171,6 +172,7 @@ class BrowserTool:
             old_url = self._page.url
             old_title = await self._page.title()
             await locator.select_option(value)
+            await self._smart_wait()
             new_url = self._page.url
             new_title = await self._page.title()
             elapsed = time.time() - start
@@ -195,15 +197,35 @@ class BrowserTool:
         logger.debug("📜 scroll: {} | {}", direction, amount)
         start = time.time()
         try:
-            delta_y = amount if direction == "down" else -amount
-            if direction in ("down", "up"):
-                await self._page.evaluate(f"window.scrollBy(0, {delta_y})")
+            # 入口强制转换 amount，避免 f-string 拼接用户输入导致的 JS 注入
+            try:
+                amount = int(amount)
+            except (TypeError, ValueError):
+                return Observation.fail(
+                    error=f"滚动参数非法: amount={amount!r}（应为整数）",
+                    url=self._page.url,
+                )
+
+            if direction == "down":
+                # 参数化传值，禁止字符串拼接
+                await self._page.evaluate(
+                    "(delta) => window.scrollBy(0, delta)", amount
+                )
+            elif direction == "up":
+                await self._page.evaluate(
+                    "(delta) => window.scrollBy(0, delta)", -amount
+                )
             elif direction == "bottom":
                 await self._page.evaluate(
-                    "window.scrollTo(0, document.body.scrollHeight)"
+                    "() => window.scrollTo(0, document.body.scrollHeight)"
                 )
             elif direction == "top":
-                await self._page.evaluate("window.scrollTo(0, 0)")
+                await self._page.evaluate("() => window.scrollTo(0, 0)")
+            else:
+                return Observation.fail(
+                    error=f"滚动方向非法: {direction}（应为 down/up/top/bottom）",
+                    url=self._page.url,
+                )
             await asyncio.sleep(0.3)
             elapsed = time.time() - start
             logger.debug("✅ scroll 完成 | {:.1f}s", elapsed)
@@ -218,11 +240,21 @@ class BrowserTool:
     async def wait(self, ms: int = 1000) -> Observation:
         """等待指定毫秒数"""
         logger.debug("⏳ wait: {}ms", ms)
-        await asyncio.sleep(ms / 1000)
-        return Observation.ok(
-            url=self._page.url,
-            title=await self._page.title(),
-        )
+        start = time.time()
+        try:
+            if not isinstance(ms, int) or isinstance(ms, bool) or ms < 0:
+                return Observation.fail(
+                    error=f"等待参数非法: ms={ms!r}（应为非负整数）",
+                    url=self._page.url,
+                )
+            await asyncio.sleep(ms / 1000)
+            return Observation.ok(
+                url=self._page.url,
+                title=await self._page.title(),
+            )
+        except Exception as e:
+            logger.error("❌ wait 失败: {}", e)
+            return Observation.fail(error=f"等待失败: {e}", url=self._page.url)
 
     async def download(
         self,
@@ -241,6 +273,7 @@ class BrowserTool:
             download = await download_info.value
             target_path = save_path or Path.cwd() / download.suggested_filename
             await download.save_as(str(target_path))
+            await self._smart_wait()
 
             elapsed = time.time() - start
             logger.info("✅ download 完成 | 保存到: {} | {:.1f}s", target_path, elapsed)
@@ -317,7 +350,6 @@ class BrowserTool:
         start = time.time()
         try:
             screenshot_bytes = await self._page.screenshot(full_page=full_page)
-            import base64
             b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
             elapsed = time.time() - start
             logger.info("✅ screenshot 完成 | {} bytes | {:.1f}s",

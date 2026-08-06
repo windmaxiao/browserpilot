@@ -105,15 +105,15 @@ class TestIssue1_SelectorConsistency:
         assert selector == "#content-area", f"非按钮元素应优先使用 id: {selector}"
 
     @pytest.mark.asyncio
-    async def test_snapshot_button_uses_has_text_over_id(self):
-        """按钮元素有文本时优先使用 has-text（语义更稳定）"""
+    async def test_snapshot_button_uses_id_over_text(self):
+        """按钮元素有 id 时优先使用 id 选择器（V0.2 计划 2.3 优先级）"""
         mock_page = AsyncMock()
         mock_el = AsyncMock()
         mock_el.evaluate = AsyncMock(return_value="button")
         mock_el.inner_text = AsyncMock(return_value="登录")
         mock_el.bounding_box = AsyncMock(return_value=None)
 
-        # 即使有 id，按钮也优先用 has-text
+        # 有 id 时，即使有文本也优先用 id
         mock_el.get_attribute = AsyncMock(side_effect=lambda attr: {
             "id": "btn-login",
             "data-testid": "",
@@ -123,8 +123,8 @@ class TestIssue1_SelectorConsistency:
 
         sg = SnapshotGenerator(mock_page)
         selector = await sg._build_selector(mock_el, "button", "登录")
-        assert selector == 'button:has-text("登录")', \
-            f"按钮应优先使用 has-text 而非 id: {selector}"
+        assert selector == "#btn-login", \
+            f"按钮应优先使用 id 而非 has-text: {selector}"
 
 
 # ═══════════════════════════════════════════════════════════════

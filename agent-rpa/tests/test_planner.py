@@ -253,6 +253,42 @@ class TestCustomRulesAndReset:
         snap = Snapshot(title="随便", url="about:blank")
         assert await planner.plan(snap, "随便看看") is None
 
+    @pytest.mark.asyncio
+    async def test_custom_rule_exception_falls_through(self):
+        """单条自定义规则异常被捕获，不中断规划（V0.2 B1）"""
+        planner = RuleBasedPlanner()
+        snap = search_page_snapshot()
+
+        def bad_condition(s, g):
+            raise RuntimeError("boom")
+
+        planner.add_rule(
+            condition=bad_condition,
+            action_fn=lambda s: Action(action="refresh"),
+            name="bad-rule",
+        )
+        action = await planner.plan(snap, "查找 北京时间")
+        # 异常规则被跳过，继续走内置规则 → input
+        assert action.action == "input"
+
+    def test_add_rule_supports_name(self):
+        """add_rule 支持可读规则名，默认取函数名（V0.2 B1）"""
+        planner = RuleBasedPlanner()
+
+        def my_action(s):
+            return None
+
+        planner.add_rule(
+            condition=lambda s, g: True,
+            action_fn=my_action,
+            name="我的规则",
+        )
+        assert planner._rules[0][0] == "我的规则"
+
+        # 未指定 name 时取 action_fn.__name__
+        planner.add_rule(condition=lambda s, g: True, action_fn=my_action)
+        assert planner._rules[1][0] == "my_action"
+
 
 # ═══════════════════════════════════════════════════════════════
 # 解析增强：点击 X / 等待 X

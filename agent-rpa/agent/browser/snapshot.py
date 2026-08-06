@@ -37,6 +37,8 @@ class SnapshotGenerator:
         """生成当前页面的 Snapshot"""
         logger.info("📄 生成 Snapshot...")
         start = time.time()
+        # element_id 仅在单次 Snapshot 内有效，每次生成前重置（V0.2 计划 2.1）
+        self._element_counter = 0
         title = await self._page.title()
         url = self._page.url
 
@@ -205,10 +207,25 @@ class SnapshotGenerator:
             return None
 
     async def _build_selector(self, el, tag: str, text: str) -> str:
-        """为元素生成 Playwright 选择器"""
-        if text and tag in ("button", "a", "label"):
-            safe_text = text.replace('"', '\\"')
-            return f'{tag}:has-text("{safe_text}")'
+        """为元素生成 Playwright 选择器。
+
+        稳定性优先（V0.2 计划 2.3）：
+        1. data-testid（CSS 转义）
+        2. id（CSS 转义）
+        3. role
+        4. aria-label
+        5. 有限长度的标签 + 文本 selector
+        6. 标签名兜底
+
+        ID / 属性值一律经 CSS 转义，禁止直接拼接未转义值（Issue 16）。
+        """
+        testid = ""
+        try:
+            testid = await el.get_attribute("data-testid") or ""
+        except Exception:
+            pass
+        if testid:
+            return f'[data-testid="{self._css_escape_string(testid)}"]'
 
         el_id = ""
         try:
@@ -216,15 +233,7 @@ class SnapshotGenerator:
         except Exception:
             pass
         if el_id:
-            return f"#{el_id}"
-
-        testid = ""
-        try:
-            testid = await el.get_attribute("data-testid") or ""
-        except Exception:
-            pass
-        if testid:
-            return f'[data-testid="{testid}"]'
+            return f"#{self._css_escape_ident(el_id)}"
 
         role = ""
         try:
@@ -232,7 +241,7 @@ class SnapshotGenerator:
         except Exception:
             pass
         if role:
-            return f'[role="{role}"]'
+            return f'[role="{self._css_escape_string(role)}"]'
 
         aria = ""
         try:
@@ -240,13 +249,37 @@ class SnapshotGenerator:
         except Exception:
             pass
         if aria:
-            return f'[aria-label="{aria}"]'
+            return f'[aria-label="{self._css_escape_string(aria)}"]'
 
-        if text:
-            safe_text = text.replace('"', '\\"')
-            return f'{tag}:has-text("{safe_text[:50]}")'
+        if text and tag:
+            safe_text = self._css_escape_string(text[:50])
+            return f'{tag}:has-text("{safe_text}")'
 
         return tag
+
+    @staticmethod
+    def _css_escape_ident(value: str) -> str:
+        """将字符串转义为合法的 CSS 标识符（用于 #id 选择器）。
+
+        仅保留字母/数字/下划线/连字符；其余字符（含首字符数字）以
+        \\<hex> 形式转义并加空格终止符，避免 `.` `:` `"` 等被 CSS 误解析。
+        """
+        if not value:
+            return value
+        out: list[str] = []
+        for i, ch in enumerate(value):
+            if i == 0 and ch.isdigit():
+                out.append(f"\\{ord(ch):x} ")
+            elif ch.isalnum() or ch in ("_", "-"):
+                out.append(ch)
+            else:
+                out.append(f"\\{ord(ch):x} ")
+        return "".join(out)
+
+    @staticmethod
+    def _css_escape_string(value: str) -> str:
+        """将属性值转义为合法的 CSS 字符串字面量（用于 [attr="..."] 选择器）。"""
+        return value.replace("\\", "\\\\").replace('"', '\\"')
 
     @staticmethod
     def _disambiguate_selectors(elements: list[ElementInfo]) -> None:

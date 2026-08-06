@@ -21,7 +21,10 @@
 ```
 browserpilot/
 ├── AGENTS.md                          # ← 本文件，AI 编程助手手册
-├── 待解决问题.md                       # 已知问题和修复追踪
+├── 待解决问题.md                       # 已知问题追踪（仅剩未解决项）
+├── 使用文档.md                         # 面向使用者的安装/运行/规则引擎指南
+├── V0.2开发计划.md                     # V0.2 开发计划（✅ 已完成）
+├── V0.3开发计划.md                     # V0.3 开发计划（LLM Planner，待开始）
 ├── Agentic_RPA_项目规划_V0.1.md        # 原始项目规划文档
 ├── README.md                          # 项目入口 README
 ├── LICENSE                            # Apache License 2.0
@@ -36,7 +39,7 @@ browserpilot/
     │   │
     │   ├── schema/                    # 【数据模型层】— 无外部依赖，纯 dataclass
     │   │   ├── __init__.py
-    │   │   ├── action.py              #   Action 数据模型 + 工厂函数
+    │   │   ├── action.py              #   Action 数据模型 + 工厂函数 + 参数校验
     │   │   ├── observation.py         #   Observation 数据模型
     │   │   └── snapshot.py            #   Snapshot + ElementInfo 数据模型
     │   │
@@ -50,7 +53,7 @@ browserpilot/
     │   │   ├── agent.py               #   Agent 主循环
     │   │   ├── executor.py            #   Action → BrowserTool 翻译层
     │   │   ├── observer.py            #   SnapshotGenerator 的 Agent 包装
-    │   │   └── planner.py             #   Planner 基类 + RuleBasedPlanner
+    │   │   └── planner.py             #   Planner 基类 + RuleBasedPlanner（8 条规则）
     │   │
     │   ├── llm/                       # 【预留】LLM 模块
     │   │   └── __init__.py
@@ -61,14 +64,21 @@ browserpilot/
     │
     ├── examples/
     │   ├── manual_demo.py             # 手动模式 Demo（直接调用工具）
-    │   └── agent_demo.py              # Agent 模式 Demo（Agent 主循环）
+    │   ├── agent_demo.py              # 规则 Agent 模式 Demo（本地搜索页）
+    │   ├── baidu_demo.py              # 规则 Agent 模式 Demo（真实百度）
+    │   └── search_page.html           # 本地确定性搜索页
     │
-    └── tests/
+    └── tests/                         # 9 个文件，180 个用例
         ├── __init__.py
-        ├── test_action.py             # Action Schema 测试
-        ├── test_observation.py        # Observation Schema 测试
-        ├── test_snapshot.py           # Snapshot Schema 测试
-        └── test_executor.py           # Executor 测试（Mock BrowserTool）
+        ├── test_action.py             # Action Schema + 参数校验
+        ├── test_observation.py        # Observation Schema
+        ├── test_snapshot.py           # Snapshot Schema + Generator 基础
+        ├── test_executor.py           # Executor 调度 + target_id 定位
+        ├── test_planner.py            # RuleBasedPlanner 规则引擎
+        ├── test_browser_tool.py       # BrowserTool（click 指纹/wait/scroll 防护）
+        ├── test_snapshot_generator.py # SnapshotGenerator（selector 转义/ID 生命周期）
+        ├── test_regression_fixed_issues.py  # 已修复问题回归
+        └── test_agent_integration.py  # Agent 主循环 Mock 集成
 ```
 
 ---
@@ -259,7 +269,7 @@ class Snapshot:
 | `_extract_links()` | a[href] |
 | `_extract_texts()` | h1-h6, p, span, label, li, td, th, strong, em |
 | `_extract_selects()` | select |
-| `_build_selector()` | 生成选择器：has-text > id > data-testid > role > aria-label > tag |
+| `_build_selector()` | 生成选择器：data-testid > id > role > aria-label > 标签+文本 > 标签名（ID/属性值经 CSS 转义） |
 
 ---
 
@@ -361,7 +371,8 @@ class Observer:
 - ✅ Agent 主循环框架 (Observe→Plan→Execute→Record)
 - ✅ **RuleBasedPlanner 规则引擎（V0.2）**：parse_goal 目标解析（URL/搜索词/点击目标/等待条件）+ 8 条内置规则
 - ✅ **click() page_changed 增强（V0.2）**：URL + 标题 + DOM 指纹三重判定
-- ✅ 6 个测试文件，144 个用例（Schema / Executor / Planner / BrowserTool）
+- ✅ **执行契约加固（V0.2 阶段 A）**：Action 参数校验完整化、BrowserTool 异常边界统一（wait/scroll 防护）、Snapshot selector CSS 转义与 element_id 生命周期重置、Observation.fail() 显式 data
+- ✅ 9 个测试文件，180 个用例（Schema / Executor / Planner / BrowserTool / SnapshotGenerator / Agent 集成）
 - ✅ 2 个 Demo（手动模式 + 规则 Agent 模式，端到端跑通）
 
 ### 已知问题（详见 [待解决问题.md](待解决问题.md)，下表为摘要）
@@ -370,17 +381,26 @@ class Observer:
 |---|------|--------|------|
 | 1 | Snapshot 与 Executor 选择器不一致 | 🔴 | ✅ 已修复 |
 | 2 | click/page_changed 始终为 True | 🔴 | ✅ 已修复 |
-| 3 | texts 含 span 噪音 | 🟡 | 待解决 |
-| 4 | BrowserTool/SnapshotGenerator 无测试 | 🟡 | 部分完成（BrowserTool click 已有测试；SnapshotGenerator 仍缺） |
+| 3 | texts 含 span 噪音 | 🟡 | 暂不处理 |
+| 4 | BrowserTool/SnapshotGenerator 无测试 | 🟡 | ✅ 已修复（BrowserTool + SnapshotGenerator + Agent 集成测试） |
 | 5 | _smart_wait 每次等 8 秒 | 🟡 | ✅ 已修复（wait_for_load_state 3s） |
-| 6 | ElementInfo 不保留 data-testid | 🟢 | 待解决 |
+| 6 | ElementInfo 不保留 data-testid | 🟢 | ✅ 已修复（存入 attributes） |
 | 7 | Observation.ok() data 参数风险 | 🟢 | ✅ 已修复 |
 | 8 | 定位契约不完整 | 🔴 | ✅ 已修复 |
 | 9 | data 嵌套已影响功能 | 🔴 | ✅ 已修复 |
 | 10 | page_changed 仅比较 URL | 🟡 | ✅ 已修复（URL + 标题 + DOM 指纹） |
 | 11 | Snapshot 未过滤不可见元素 | 🟡 | ✅ 已修复 |
-| 12 | Action.validate() 验证不完整 | 🟡 | 待解决 |
+| 12 | Action.validate() 验证不完整 | 🟡 | ✅ 已修复（参数契约见 V0.2 计划 2.2） |
 | 13 | 测试命令与安装方式不匹配 | 🟡 | ✅ 已修复 |
+| 15 | BrowserTool.wait() 非法参数未转 Observation | 🟡 | ✅ 已修复 |
+| 16 | Snapshot selector 未转义特殊字符 | 🟡 | ✅ 已修复（CSS 转义 + 优先级 2.3） |
+| 17 | element_id 多次 Snapshot 间累加 | 🟡 | ✅ 已修复（每次 generate 重置） |
+| 18 | scroll() f-string JS 注入 | 🔴 | ✅ 已修复（参数化 evaluate） |
+| 19 | _smart_wait 调用不一致 | 🟡 | ✅ 已修复（select/download 统一） |
+| 20 | Observation.fail() **data 嵌套 | 🟡 | ✅ 已修复 |
+| 23 | screenshot() 内部 import base64 | 🟢 | ✅ 已修复 |
+
+> 完整列表见 [待解决问题.md](待解决问题.md)：共 23 项，✅ 已修复 20 项，⏳ 待解决 2 项（#21、#22）。
 
 ---
 
@@ -389,7 +409,7 @@ class Observer:
 | 版本 | 目标 | 关键变更 | 状态 |
 |------|------|----------|------|
 | **V0.1** | 执行层：Browser Tool + Snapshot + Observation + Schema | 核心执行框架 | ✅ 完成 |
-| **V0.2** | Agent Loop：规则驱动 Planner | `RuleBasedPlanner` 规则引擎（目标解析：URL/搜索词/点击目标/等待条件 + 8 条内置规则）；Snapshot 不可见元素过滤；click() page_changed DOM 指纹检测 | ✅ 完成 |
+| **V0.2** | Agent Loop：规则驱动 Planner + 执行契约加固 | `RuleBasedPlanner` 规则引擎（目标解析：URL/搜索词/点击目标/等待条件 + 8 条内置规则）；Snapshot 不可见元素过滤 + selector CSS 转义 + element_id 生命周期；click() page_changed DOM 指纹检测；Action 参数校验完整化；BrowserTool 异常边界统一 | ✅ 完成 |
 | **V0.3** | 接入 LLM：LLM Planner | `LLMPlanner` 类；prompt 模板；Snapshot→LLM→Action 管线 | 📋 待开始 |
 | **V0.4** | Reflection：错误恢复与重试 | Agent 失败重试；循环检测；后退/刷新恢复 | 📋 待开始 |
 | **V0.5** | Memory：历史操作与上下文记忆 | 摘要式记忆；滑动窗口；上下文压缩 | 📋 待开始 |
@@ -397,7 +417,7 @@ class Observer:
 
 ### 各版本关键关注点
 
-- **V0.2（已完成）备注：** Snapshot 不可见元素过滤与 `_build_selector` 已完成；`RuleBasedPlanner` 8 条规则已完成（含点击目标、等待条件）；click() page_changed 已含 DOM 指纹。遗留项：bbox 未启用、SnapshotGenerator 无独立测试
+- **V0.2（已完成）备注：** Snapshot 不可见元素过滤、selector CSS 转义与优先级（2.3）、element_id 生命周期重置已完成；`RuleBasedPlanner` 8 条规则已完成（含点击目标、等待条件）；click() page_changed 已含 DOM 指纹；Action 参数校验与 BrowserTool 异常边界已加固。遗留项：bbox 未启用
 - **V0.3 重点：** `llm/` 和 `prompts/` 目录的实现；Agent 的 `run()` 需要切换到 LLM Planner；`observe_simplified()` 需要实际被调用
 - **V0.4 重点：** Agent 的 run() 循环需要增加重试逻辑和循环检测
 - **V0.5 重点：** Agent 的 history 管理需要压缩和摘要策略
@@ -409,9 +429,9 @@ class Observer:
 - **Schema 测试（现有）：** 纯数据类测试，无外部依赖
 - **Executor 测试（现有）：** Mock BrowserTool 验证 dispatch 和参数传递
 - **Planner 测试（现有）：** Mock Snapshot 验证规则匹配与状态推进
-- **BrowserTool 测试（部分）：** AsyncMock Page 对象，已覆盖 click() page_changed DOM 指纹检测
-- **SnapshotGenerator 测试（缺失）：** Mock Page 返回模拟 DOM，验证提取逻辑
-- **Agent 集成测试（未来）：** 端到端流程验证（当前以 Demo 代替）
+- **BrowserTool 测试（现有）：** AsyncMock Page 对象，覆盖 click() page_changed DOM 指纹、wait()/scroll() 非法参数防护与异常转换
+- **SnapshotGenerator 测试（现有）：** Mock Page 验证可见性过滤、selector 优先级与 CSS 转义、element_id 生命周期
+- **Agent 集成测试（现有）：** Mock Observer/Planner/BrowserTool 验证 run() 全链路（done / 执行失败 / 非法 Action / 最大步数）
 
 ### 运行测试
 

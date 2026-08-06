@@ -140,7 +140,7 @@ class RuleBasedPlanner(Planner):
     _WAIT_MS = 800
 
     def __init__(self):
-        self._rules: list[tuple[Callable, Callable]] = []
+        self._rules: list[tuple[str, Callable, Callable]] = []
         self._spec: Optional[TaskSpec] = None
         self._searched = False      # 是否已输入关键词
         self._submitted = False     # 是否已提交搜索
@@ -149,9 +149,21 @@ class RuleBasedPlanner(Planner):
 
     # ── 自定义规则 ──────────────────────────────────────────────
 
-    def add_rule(self, condition: Callable, action_fn: Callable) -> None:
-        """注册自定义规则：condition(snapshot, goal) 为真时执行 action_fn(snapshot)。"""
-        self._rules.append((condition, action_fn))
+    def add_rule(
+        self,
+        condition: Callable,
+        action_fn: Callable,
+        name: str = "",
+    ) -> None:
+        """注册自定义规则：condition(snapshot, goal) 为真时执行 action_fn(snapshot)。
+
+        Args:
+            condition: 条件函数 condition(snapshot, goal) -> bool
+            action_fn: 动作函数 action_fn(snapshot) -> Action | None
+            name: 可读规则名（用于日志/测试定位），默认取 action_fn.__name__
+        """
+        rule_name = name or getattr(action_fn, "__name__", "anonymous")
+        self._rules.append((rule_name, condition, action_fn))
 
     # ── 主入口 ──────────────────────────────────────────────────
 
@@ -163,12 +175,16 @@ class RuleBasedPlanner(Planner):
             spec.wait_texts or ("加载完成" if spec.wait_loading else "-"),
             self._searched, self._submitted, sorted(self._clicked),
         )
-        # 自定义规则优先
-        for condition, action_fn in self._rules:
-            if condition(snapshot, goal):
-                action = action_fn(snapshot)
-                if action is not None:
-                    return action
+        # 自定义规则优先；单条规则异常不中断规划，记录后继续下一条
+        for rule_name, condition, action_fn in self._rules:
+            try:
+                if condition(snapshot, goal):
+                    action = action_fn(snapshot)
+                    if action is not None:
+                        return action
+            except Exception as e:
+                logger.warning("自定义规则 '{}' 执行异常，跳过: {}", rule_name, e)
+                continue
         action = await self._builtin_plan(snapshot, spec)
         # 非等待动作视为有进展，重置等待计数
         if action is not None and action.action != "wait":

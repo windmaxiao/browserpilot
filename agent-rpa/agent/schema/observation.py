@@ -77,10 +77,17 @@ class Observation:
         )
 
     @classmethod
-    def fail(cls, error: str, url: Optional[str] = None, **data) -> Observation:
+    def fail(
+        cls,
+        error: str,
+        url: Optional[str] = None,
+        data: Optional[dict] = None,
+        **kwargs,
+    ) -> Observation:
+        merged = {**(data or {}), **kwargs}
         return cls(
             success=False,
             url=url,
             error=error,
-            data=data,
+            data=merged,
         )

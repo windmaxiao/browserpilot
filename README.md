@@ -61,21 +61,25 @@ pip install -e ".[dev]"
 # 安装 Playwright 浏览器
 playwright install chromium
 
-# 运行 Demo
+# 运行 Demo（手动模式：完整 RPA 流程）
 python examples/manual_demo.py
 
-# 运行测试
+# 运行 Demo（规则 Agent 模式：本地搜索页 / 真实百度）
+python examples/agent_demo.py
+python examples/baidu_demo.py
+
+# 运行测试（9 个测试文件，180 个用例）
 pytest
 ```
 
-> 详细文档见 [agent-rpa/README.md](agent-rpa/README.md)，**使用指南见 [使用文档.md](使用文档.md)**
+> 详细文档见 [agent-rpa/README.md](agent-rpa/README.md)，**使用指南见 [使用文档.md](使用文档.md)**，**已知问题见 [待解决问题.md](待解决问题.md)**
 
 ## 开发路线
 
 | 版本 | 目标 | 状态 |
 |------|------|------|
 | V0.1 | 执行层：Browser Tool + Snapshot + Observation + Schema | ✅ 完成 |
-| V0.2 | Agent Loop：规则驱动 Planner | ⏳ 进行中 |
+| V0.2 | Agent Loop：规则驱动 Planner + 执行契约加固 | ✅ 完成 |
 | V0.3 | 接入 LLM：LLM Planner | 📋 待开始 |
 | V0.4 | Reflection：错误恢复与重试 | 📋 待开始 |
 | V0.5 | Memory：历史操作与上下文记忆 | 📋 待开始 |

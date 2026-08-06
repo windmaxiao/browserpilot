@@ -97,3 +97,90 @@ class TestPageFingerprint:
         tool = BrowserTool(page)
         fp = await tool._page_fingerprint()
         assert fp == {"elements": 5, "text_len": 10}
+
+
+class TestWaitAndScrollDefensive:
+    """V0.2 A2: 非法参数转换为 Observation.fail，杜绝 JS 注入"""
+
+    @pytest.mark.asyncio
+    async def test_wait_valid_ms(self):
+        page, _ = make_page_mock()
+        tool = BrowserTool(page)
+        obs = await tool.wait(0)
+        assert obs.success is True
+
+    @pytest.mark.asyncio
+    async def test_wait_negative_ms_returns_fail(self):
+        page, _ = make_page_mock()
+        tool = BrowserTool(page)
+        obs = await tool.wait(-100)
+        assert obs.is_error is True
+        assert "ms" in obs.error
+
+    @pytest.mark.asyncio
+    async def test_wait_string_ms_returns_fail(self):
+        page, _ = make_page_mock()
+        tool = BrowserTool(page)
+        obs = await tool.wait("fast")
+        assert obs.is_error is True
+
+    @pytest.mark.asyncio
+    async def test_wait_page_exception_returns_fail(self):
+        """page 异常（如 title 失败）不向上泄漏"""
+        page, _ = make_page_mock()
+        page.title = AsyncMock(side_effect=Exception("page closed"))
+        tool = BrowserTool(page)
+        obs = await tool.wait(10)
+        assert obs.is_error is True
+        assert "等待失败" in obs.error
+
+    @pytest.mark.asyncio
+    async def test_scroll_valid_amount_parameterized(self):
+        """amount 通过 evaluate 参数传递，而非字符串拼接（防 JS 注入）"""
+        page, _ = make_page_mock()
+        page.evaluate = AsyncMock()
+        tool = BrowserTool(page)
+        obs = await tool.scroll("down", 300)
+        assert obs.success is True
+        page.evaluate.assert_awaited_once()
+        args, _ = page.evaluate.call_args
+        assert isinstance(args[0], str)
+        assert args[1] == 300
+
+    @pytest.mark.asyncio
+    async def test_scroll_up_uses_negative_amount(self):
+        page, _ = make_page_mock()
+        page.evaluate = AsyncMock()
+        tool = BrowserTool(page)
+        await tool.scroll("up", 100)
+        args, _ = page.evaluate.call_args
+        assert args[1] == -100
+
+    @pytest.mark.asyncio
+    async def test_scroll_invalid_amount_returns_fail(self):
+        """'300px' 等非法 amount 返回失败，且不执行 evaluate"""
+        page, _ = make_page_mock()
+        page.evaluate = AsyncMock()
+        tool = BrowserTool(page)
+        obs = await tool.scroll("down", "300px")
+        assert obs.is_error is True
+        page.evaluate.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scroll_invalid_direction_returns_fail(self):
+        page, _ = make_page_mock()
+        page.evaluate = AsyncMock()
+        tool = BrowserTool(page)
+        obs = await tool.scroll("left", 300)
+        assert obs.is_error is True
+        assert "direction" in obs.error or "方向" in obs.error
+
+    @pytest.mark.asyncio
+    async def test_select_calls_smart_wait(self):
+        """select() 后调用 _smart_wait，保持与 click() 一致（Issue 19）"""
+        page, locator = make_page_mock()
+        locator.select_option = AsyncMock()
+        tool = BrowserTool(page)
+        obs = await tool.select("#city", "北京")
+        assert obs.success is True
+        page.wait_for_load_state.assert_awaited()

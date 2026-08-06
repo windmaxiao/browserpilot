@@ -9,6 +9,7 @@ Playwright 只是执行器。
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, Optional
 
 
@@ -27,6 +28,38 @@ ActionType = Literal[
     "screenshot",  # 截图
     "done",        # 任务完成
 ]
+
+VALID_ACTIONS = frozenset({
+    "click", "input", "select", "goto", "scroll",
+    "wait", "download", "upload", "back", "refresh",
+    "screenshot", "done",
+})
+
+# 需要目标元素定位的动作：target / target_id / params["selector"] 三选一
+NEEDS_TARGET = frozenset({"click", "select", "download", "upload", "input"})
+
+
+# ── 参数校验辅助函数 ────────────────────────────────────────────────
+
+def _check_positive_int(params: dict, key: str, errors: list[str]) -> None:
+    """校验正整数参数（如 timeout）。未设置时跳过。"""
+    val = params.get(key)
+    if val is not None and (not isinstance(val, int) or isinstance(val, bool) or val <= 0):
+        errors.append(f"参数非法: {key}={val!r}（应为正整数）")
+
+
+def _check_non_negative_int(params: dict, key: str, errors: list[str]) -> None:
+    """校验非负整数参数（如 wait.ms / scroll.amount）。未设置时跳过。"""
+    val = params.get(key)
+    if val is not None and (not isinstance(val, int) or isinstance(val, bool) or val < 0):
+        errors.append(f"参数非法: {key}={val!r}（应为非负整数）")
+
+
+def _check_bool(params: dict, key: str, errors: list[str]) -> None:
+    """校验布尔参数（如 force / clear_first / full_page）。未设置时跳过。"""
+    val = params.get(key)
+    if val is not None and not isinstance(val, bool):
+        errors.append(f"参数非法: {key}={val!r}（应为布尔值）")
 
 
 @dataclass
@@ -77,28 +110,39 @@ class Action:
     # ── 验证 ────────────────────────────────────────────────────────
 
     def validate(self) -> list[str]:
-        """返回验证错误列表，为空表示合法。"""
+        """返回验证错误列表，为空表示合法。
+
+        参数契约见 V0.2 开发计划 2.2：
+        - click: timeout 正整数, force bool
+        - input: value 可为空字符串（清空用）, clear_first bool, timeout 正整数
+        - select/download/upload/goto: timeout 正整数；select/upload 需 value
+        - scroll: direction 枚举, amount 非负整数
+        - wait: ms 非负整数
+        - screenshot: full_page bool
+        - 需要元素的动作: target / target_id / params["selector"] 三选一
+        """
         errors: list[str] = []
 
-        valid_actions = {
-            "click", "input", "select", "goto", "scroll",
-            "wait", "download", "upload", "back", "refresh",
-            "screenshot", "done",
-        }
-        if self.action not in valid_actions:
+        if self.action not in VALID_ACTIONS:
             errors.append(f"未知动作类型: {self.action}")
+            return errors
 
+        # ── 必填 value 校验 ──
         if self.action == "goto" and not self.value:
             errors.append("goto 动作需要提供 value (URL)")
-
         if self.action == "input" and self.value is None:
             errors.append("input 动作需要提供 value (输入文本)")
+        if self.action == "select" and not self.value:
+            errors.append("select 动作需要提供 value (选项值)")
+        if self.action == "upload" and not self.value:
+            errors.append("upload 动作需要提供 value (文件路径)")
 
-        # 需要目标元素的动作：必须提供 target 或 target_id
-        needs_target = {"click", "select", "download", "upload", "input"}
-        if self.action in needs_target and not self.target and not self.target_id:
+        # 需要目标元素的动作：必须提供 target / target_id / params["selector"]
+        if self.action in NEEDS_TARGET and not (
+            self.target or self.target_id or self.params.get("selector")
+        ):
             errors.append(
-                f"{self.action} 动作需要提供 target 或 target_id"
+                f"{self.action} 动作需要提供 target、target_id 或 params['selector']"
             )
 
         # 验证 target_id 格式（如果设置）
@@ -107,6 +151,36 @@ class Action:
                 errors.append(
                     f"target_id 格式无效: '{self.target_id}'"
                     "（应为 'e' 开头后跟数字，如 e0、e1）"
+                )
+
+        # ── 参数类型 / 范围校验 ──
+        if self.action == "click":
+            _check_positive_int(self.params, "timeout", errors)
+            _check_bool(self.params, "force", errors)
+        elif self.action == "input":
+            _check_bool(self.params, "clear_first", errors)
+            _check_positive_int(self.params, "timeout", errors)
+        elif self.action in ("select", "goto", "download", "upload"):
+            _check_positive_int(self.params, "timeout", errors)
+        elif self.action == "scroll":
+            direction = self.params.get("direction", "down")
+            if direction not in ("down", "up", "top", "bottom"):
+                errors.append(
+                    f"scroll 参数非法: direction={direction!r}"
+                    "（应为 down/up/top/bottom）"
+                )
+            _check_non_negative_int(self.params, "amount", errors)
+        elif self.action == "wait":
+            _check_non_negative_int(self.params, "ms", errors)
+        elif self.action == "screenshot":
+            _check_bool(self.params, "full_page", errors)
+
+        if self.action == "download":
+            save_path = self.params.get("save_path")
+            if save_path is not None and not isinstance(save_path, (str, Path)):
+                errors.append(
+                    f"download 参数非法: save_path={save_path!r}"
+                    "（应为字符串或 Path）"
                 )
 
         return errors
