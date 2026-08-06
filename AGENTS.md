@@ -304,7 +304,7 @@ class Agent:
 
 **关键设计决策：**
 - Step 索引从 1 开始
-- 失败即返回（V0.4 才实现 Reflection 重试）
+- **失败自动重试（V0.4）**：机械重试 1 次 → Reflection（LLM 分析失败给出替代动作）1 次 → 仍失败尝试页面恢复（back/refresh）→ 仍失败中止任务
 - Planner 返回 None 表示无法规划
 - **异常防护**：`_safe_observe()` / `_safe_execute()` 捕获浏览器关闭等异常，优雅返回失败 Observation 而非崩溃
 - **停滞检测**：LLM 在 action 步骤中连续 2 次 wait 且页面无变化 → 提前终止；计划内 wait 步骤不计入
@@ -341,7 +341,7 @@ class Observer:
 | `parse_goal(goal)` | 从目标提取 URL / 搜索词 / 点击目标 / 等待条件 → TaskSpec |
 | `Planner` | 基类，`plan()` 抛出 NotImplementedError；`plan_with_history()` 默认转发 plan；`decompose()` 默认返回 None（自由模式）；`plan_step()` 默认退化为 plan_with_history |
 | `RuleBasedPlanner` | 规则引擎（V0.2 完成）：8 条内置规则 + `add_rule()` 自定义规则优先 |
-| `LLMPlanner` | LLM 规划器（V0.3 完成，自由模式）：Snapshot 序列化 → 提示词 → 模型输出 → 安全 Action 转换；内容层错误最多一次修复 |
+| `LLMPlanner` | LLM 规划器（V0.3 完成，自由模式）：Snapshot 序列化 → 提示词 → 模型输出 → 安全 Action 转换；内容层错误最多一次修复；`reflect()` 失败反思（V0.4） |
 | `TaskStep` / `TaskQueue` | 任务步骤数据模型与队列（V0.4 前瞻）：kind ∈ action/wait/verify；wait/verify 由框架直接执行 |
 | `TaskPlanner` | 两阶段规划器（V0.4 前瞻）：`decompose()` 一次 LLM 调用把目标拆成步骤队列 + `plan_step()` 提示词携带「当前步骤 + 剩余步骤」分步决策；拆解失败自动回退自由模式 |
 
@@ -430,8 +430,9 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 - ✅ **安全边界（V0.3）**：模型上下文脱敏（无 selector/HTML/Cookie/截图，URL 敏感参数掩码）、伪造 selector 忽略、幻觉 target_id 拦截
 - ✅ **两阶段任务队列（V0.4 前瞻）**：`TaskPlanner`（`decompose` 拆解目标为步骤队列 + `plan_step` 分步决策）、`TaskStep/TaskQueue`、Agent 双模式（步骤模式/自由模式自动回退）、wait/verify 步骤由框架直接执行（不经过 LLM）、队列耗尽即完成
 - ✅ **异常防护（V0.4 前瞻）**：`_safe_observe()` / `_safe_execute()` 浏览器关闭时优雅失败；停滞检测（LLM 连续 2 次 wait 且页面无变化提前终止）
+- ✅ **Reflection 重试（V0.4）**：Agent 执行失败混合重试（机械 1 次 → `Planner.reflect()` 失败反思给出替代动作 1 次 → 仍失败尝试页面恢复 → 中止）；LLM 可重试错误（超时/限流/网络）指数退避自动重试（默认 3 次）；等待步骤框架兜底（拆解误拆 action 时按描述自动纠正为 wait 并提取毫秒）；**后退/刷新恢复**（失败后自动 back/refresh 重置页面状态再重新规划，默认最多 2 次）
 - ✅ **工程化增强**：`setup_logging`（控制台 + `logs/` 按天滚动文件）、Snapshot 生成并行化提速（asyncio.gather 双层并发）、新标签页轮询跟随、`.env` 零依赖加载链
-- ✅ 14 个测试文件，286 个用例（Schema / Executor / Planner / BrowserTool / SnapshotGenerator / Agent 集成 / LLMClient / 序列化 / LLMPlanner / Logging / TaskQueue）
+- ✅ 14 个测试文件，303 个用例（Schema / Executor / Planner / BrowserTool / SnapshotGenerator / Agent 集成 / LLMClient / 序列化 / LLMPlanner / Logging / TaskQueue）
 - ✅ 5 个 Demo（手动 / 规则 Agent 本地页 / 规则 Agent 百度 / LLM Agent 自由模式 / LLM Agent 两阶段真实百度，端到端跑通）
 
 ### 已知问题（详见 [待解决问题.md](待解决问题.md)，下表为摘要）
@@ -470,7 +471,7 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 | **V0.1** | 执行层：Browser Tool + Snapshot + Observation + Schema | 核心执行框架 | ✅ 完成 |
 | **V0.2** | Agent Loop：规则驱动 Planner + 执行契约加固 | `RuleBasedPlanner` 规则引擎（目标解析：URL/搜索词/点击目标/等待条件 + 8 条内置规则）；Snapshot 不可见元素过滤 + selector CSS 转义 + element_id 生命周期；click() page_changed DOM 指纹检测；Action 参数校验完整化；BrowserTool 异常边界统一 | ✅ 完成 |
 | **V0.3** | 接入 LLM：LLM Planner | `LLMClient` 协议 + 错误分类；`MockLLMClient` + `OpenAILLMClient`；`LLMPlanner`（Snapshot 脱敏序列化 → 提示词 → 安全 Action 转换 + 一次修复）；Agent `plan_with_history()` 传历史 | ✅ 完成 |
-| **V0.4** | Reflection：错误恢复与重试 | **已前瞻完成**：任务步骤队列（TaskPlanner decompose→分步执行）、wait/verify 框架直执行、停滞检测、浏览器关闭异常防护；**待做**：Agent 失败重试、后退/刷新恢复、LLM 可重试错误自动重试 | 🔶 进行中 |
+| **V0.4** | Reflection：错误恢复与重试 | 任务步骤队列（TaskPlanner decompose→分步执行）；wait/verify 框架直执行；停滞检测；浏览器关闭异常防护；**Agent 失败重试**（机械 1 次 → Reflection 1 次 → 页面恢复 → 中止）；**LLM 可重试错误自动重试**（指数退避）；等待步骤框架兜底（action→wait 纠正）；**后退/刷新恢复** | ✅ 完成 |
 | **V0.5** | Memory：历史操作与上下文记忆 | 摘要式记忆；滑动窗口；上下文压缩 | 📋 待开始 |
 | **V1.0** | 完整 Agentic RPA | 登录/查询/下载/上传/Excel 长流程 | 🎯 规划中 |
 
@@ -478,7 +479,7 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 
 - **V0.2（已完成）备注：** Snapshot 不可见元素过滤、selector CSS 转义与优先级（2.3）、element_id 生命周期重置已完成；`RuleBasedPlanner` 8 条规则已完成（含点击目标、等待条件）；click() page_changed 已含 DOM 指纹；Action 参数校验与 BrowserTool 异常边界已加固。遗留项：bbox 未启用
 - **V0.3（已完成）备注：** `llm/`（base/mock/openai_client）与 `prompts/`（planner.py 序列化/提示词/解析）已实现；`LLMPlanner` 可替换 RuleBasedPlanner（两者可并存，便于离线回归与 fallback）；Agent `run()` 已通过 `plan_with_history()` 传入历史；`observe_simplified()` 暂由 `serialize_snapshot()` 取代（更结构化）。遗留项：真实 Provider 未做人工 smoke test（需 API Key）；Provider 采用 OpenAI 兼容协议，覆盖国内主流厂商预设（DeepSeek/Kimi/智谱/通义/豆包/千帆/星火）
-- **V0.4 重点：** Agent 的 run() 循环需要增加重试逻辑和循环检测；LLM 可重试错误（超时/限流/网络）目前直接返回失败，V0.4 补自动重试
+- **V0.4（已完成）备注：** Agent 失败重试（机械 1 次 → Reflection 1 次 → 后退/刷新恢复 → 中止）已完成；LLM 可重试错误（超时/限流/网络）指数退避自动重试已完成；停滞检测已完成（自由模式）；后退/刷新恢复已完成（`_recover_page()`：优先 back、失败降级 refresh，每 run 默认最多恢复 2 次，恢复后重新观察规划当前步骤）。V0.5 起正式进入 Memory 阶段
 - **V0.5 重点：** Agent 的 history 管理需要压缩和摘要策略
 
 ---

@@ -514,3 +514,82 @@ async def test_planner_without_reflect_only_mechanical_retry():
     assert obs.is_error is True
     assert tool.click.await_count == 2
     assert len(agent.history) == 1
+
+
+# ── V0.4：后退/刷新恢复（失败后重置页面再重新规划） ──────────────────
+
+@pytest.mark.asyncio
+async def test_recover_via_back_then_retry_succeeds():
+    """失败后后退恢复成功 → 重新规划 → 任务最终完成"""
+    agent, planner, tool = make_mocks([
+        Action(action="click", params={"selector": "#btn"}),
+        done(),
+    ])
+    tool.click = AsyncMock(return_value=Observation.fail("元素不存在"))
+    tool.back = AsyncMock(return_value=Observation.ok(page_changed=True))
+    tool.refresh = AsyncMock(return_value=Observation.ok())
+
+    obs = await agent.run("点击按钮")
+
+    assert obs.success is True
+    tool.back.assert_awaited_once()        # 后退恢复 1 次
+    tool.refresh.assert_not_awaited()      # back 成功则不再 refresh
+    assert tool.click.await_count == 2     # 首次 + 机械重试（恢复后 done 不再点击）
+    assert len(agent.history) == 1         # 失败的 click 记录一次
+
+
+@pytest.mark.asyncio
+async def test_recover_falls_back_to_refresh():
+    """后退不可用 → 刷新恢复成功 → 任务继续"""
+    agent, planner, tool = make_mocks([
+        Action(action="click", params={"selector": "#btn"}),
+        done(),
+    ])
+    tool.click = AsyncMock(return_value=Observation.fail("元素不存在"))
+    tool.back = AsyncMock(return_value=Observation.fail("无可后退页面"))
+    tool.refresh = AsyncMock(return_value=Observation.ok(page_changed=True))
+
+    obs = await agent.run("点击按钮")
+
+    assert obs.success is True
+    tool.back.assert_awaited_once()
+    tool.refresh.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_recovery_exhausted_aborts():
+    """恢复次数达到上限后再次失败 → 中止任务"""
+    agent, planner, tool = make_mocks([
+        Action(action="click", params={"selector": "#btn"}),
+        Action(action="click", params={"selector": "#btn"}),
+        done(),  # 不应被执行
+    ])
+    agent._max_recoveries = 1
+    tool.click = AsyncMock(return_value=Observation.fail("元素不存在"))
+    tool.back = AsyncMock(return_value=Observation.ok(page_changed=True))
+
+    obs = await agent.run("点击按钮")
+
+    assert obs.is_error is True
+    assert "元素不存在" in obs.error
+    assert tool.back.await_count == 1      # 恢复 1 次后达到上限
+    assert len(agent.history) == 2         # 两次失败的 click 各记录一次
+
+
+@pytest.mark.asyncio
+async def test_recovery_unavailable_aborts():
+    """back/refresh 均不可用 → 恢复失败直接中止"""
+    agent, planner, tool = make_mocks([
+        Action(action="click", params={"selector": "#btn"}),
+        done(),
+    ])
+    tool.click = AsyncMock(return_value=Observation.fail("元素不存在"))
+    tool.back = AsyncMock(return_value=Observation.fail("back 失败"))
+    tool.refresh = AsyncMock(return_value=Observation.fail("refresh 失败"))
+
+    obs = await agent.run("点击按钮")
+
+    assert obs.is_error is True
+    tool.back.assert_awaited_once()
+    tool.refresh.assert_awaited_once()
+    assert len(agent.history) == 1

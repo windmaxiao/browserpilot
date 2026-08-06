@@ -15,6 +15,7 @@ Goal → Snapshot → Planner → Action → Executor → Observation → Loop
 
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
 from loguru import logger
@@ -43,18 +44,21 @@ class Agent:
         planner: Planner,
         executor: Executor,
         max_steps: int = 50,
+        max_recoveries: int = 2,
     ):
         self._observer = observer
         self._planner = planner
         self._executor = executor
         self._max_steps = max_steps
+        self._max_recoveries = max_recoveries
 
         # 运行时状态
         self._history: list[dict] = []
         self._current_step: int = 0
         self._goal: str = ""
+        self._recovery_count: int = 0
 
-        logger.debug("Agent 初始化完成 | max_steps={}", max_steps)
+        logger.debug("Agent 初始化完成 | max_steps={} max_recoveries={}", max_steps, max_recoveries)
 
     # ── 公开接口 ────────────────────────────────────────────────────
 
@@ -90,6 +94,7 @@ class Agent:
         self._goal = goal
         self._history.clear()
         self._current_step = 0
+        self._recovery_count = 0
 
         decompose = getattr(self._planner, "decompose", None)
         steps = await decompose(goal) if decompose is not None else None
@@ -154,9 +159,16 @@ class Agent:
                 "observation": observation,
             })
 
-            # 6. Check failure（重试与 Reflection 均失败 → 中止任务）
+            # 6. Check failure（重试与 Reflection 均失败 → 尝试页面恢复，仍失败则中止）
             if observation.is_error:
                 logger.warning("❌ [Step {}] 动作失败（已重试）: {}", self._current_step, observation.error)
+                if self._recovery_count < self._max_recoveries and await self._recover_page():
+                    self._recovery_count += 1
+                    logger.info(
+                        "🔄 [Step {}] 页面已恢复，重新规划（恢复 {}/{}）",
+                        self._current_step, self._recovery_count, self._max_recoveries,
+                    )
+                    continue
                 return observation
 
             # 7. 循环检测：连续等待且页面无变化 → 任务停滞，提前终止
@@ -287,9 +299,16 @@ class Agent:
                 "observation": observation,
             })
 
-            # 6. Check failure（重试与 Reflection 均失败 → 中止任务）
+            # 6. Check failure（重试与 Reflection 均失败 → 尝试页面恢复，仍失败则中止）
             if observation.is_error:
                 logger.warning("❌ [Step {}] 动作失败（已重试）: {}", self._current_step, observation.error)
+                if self._recovery_count < self._max_recoveries and await self._recover_page():
+                    self._recovery_count += 1
+                    logger.info(
+                        "🔄 [Step {}] 页面已恢复，重新规划该步（恢复 {}/{}）",
+                        self._current_step, self._recovery_count, self._max_recoveries,
+                    )
+                    continue
                 return observation
 
             # 7. 推进队列（wait 步骤已在上面单独 pop；此处只推进 action/verify 已通过）
@@ -407,6 +426,36 @@ class Agent:
         if reflect_obs is None:
             return None, reflect_action
         return reflect_obs, reflect_action
+
+    async def _recover_page(self) -> bool:
+        """失败后尝试恢复页面状态（V0.4）：优先后退，否则刷新。
+
+        适用场景：动作失败后页面状态异常（如误跳转、元素整体失效），
+        后退/刷新可重置页面让 Agent 重新观察规划。
+
+        Returns:
+            True 表示页面已恢复，可重新观察；False 表示恢复不可用。
+        """
+        tool = self._executor._tool
+        try:
+            back_obs = await tool.back()
+            if back_obs is not None and not back_obs.is_error:
+                logger.info("🔄 页面恢复: 后退成功 | URL: {}", back_obs.url)
+                await asyncio.sleep(0.5)
+                return True
+            logger.debug("后退恢复未生效: {}", back_obs.error if back_obs else "无返回")
+        except Exception as e:
+            logger.debug("后退恢复不可用: {}", e)
+        try:
+            refresh_obs = await tool.refresh()
+            if refresh_obs is not None and not refresh_obs.is_error:
+                logger.info("🔄 页面恢复: 刷新成功")
+                return True
+            logger.debug("刷新恢复未生效: {}", refresh_obs.error if refresh_obs else "无返回")
+        except Exception as e:
+            logger.debug("刷新恢复不可用: {}", e)
+        logger.warning("🔄 页面恢复失败（back/refresh 均不可用）")
+        return False
 
     def _log_action(self, action: Action, step: int) -> None:
         """记录 Action 摘要（value 可能为 int，统一转字符串防切片崩溃）。"""
