@@ -72,7 +72,7 @@ python examples/baidu_demo.py
 python examples/llm_agent_demo.py
 python examples/llm_baidu_demo.py
 
-# 运行测试（14 个测试文件，286 个用例）
+# 运行测试（14 个测试文件，303 个用例）
 pytest
 ```
 

@@ -72,23 +72,27 @@ browserpilot/
     │   ├── manual_demo.py             # 手动模式 Demo（直接调用工具）
     │   ├── agent_demo.py              # 规则 Agent 模式 Demo（本地搜索页）
     │   ├── baidu_demo.py              # 规则 Agent 模式 Demo（真实百度）
-    │   ├── llm_agent_demo.py          # LLM Agent 模式 Demo（本地搜索页）
+    │   ├── llm_agent_demo.py          # LLM Agent 自由模式 Demo（本地搜索页）
+    │   ├── llm_baidu_demo.py          # LLM Agent 两阶段 Demo（真实百度）
+    │   ├── check_llm_connectivity.py  # 7 家国内大模型预设连通性测试
     │   └── search_page.html           # 本地确定性搜索页
     │
-    └── tests/                         # 12 个文件，243 个用例
+    └── tests/                         # 14 个文件，303 个用例
         ├── __init__.py
         ├── test_action.py             # Action Schema + 参数校验
         ├── test_observation.py        # Observation Schema
         ├── test_snapshot.py           # Snapshot Schema + Generator 基础
         ├── test_executor.py           # Executor 调度 + target_id 定位
-        ├── test_planner.py            # RuleBasedPlanner 规则引擎
+        ├── test_planner.py            # RuleBasedPlanner 规则引擎（8 条规则）
         ├── test_browser_tool.py       # BrowserTool（click 指纹/wait/scroll 防护）
         ├── test_snapshot_generator.py # SnapshotGenerator（selector 转义/ID 生命周期）
         ├── test_regression_fixed_issues.py  # 已修复问题回归
-        ├── test_agent_integration.py  # Agent 主循环 Mock 集成（含 LLM 驱动）
+        ├── test_agent_integration.py  # Agent 主循环 Mock 集成（含 LLM 驱动/步骤模式）
         ├── test_llm_client.py         # LLMClient 协议 / Mock / 错误分类
         ├── test_prompt_serialization.py      # Snapshot 序列化 / URL 脱敏 / 历史窗口
-        └── test_llm_planner.py        # LLMPlanner 解析 / 一次修复 / 完整链路
+        ├── test_llm_planner.py        # LLMPlanner 解析 / 一次修复 / 完整链路
+        ├── test_logging.py            # setup_logging 控制台 / 文件 sink
+        └── test_task_queue.py         # TaskStep/TaskQueue/拆解解析/TaskPlanner
 ```
 
 ---
@@ -478,7 +482,7 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 ### 各版本关键关注点
 
 - **V0.2（已完成）备注：** Snapshot 不可见元素过滤、selector CSS 转义与优先级（2.3）、element_id 生命周期重置已完成；`RuleBasedPlanner` 8 条规则已完成（含点击目标、等待条件）；click() page_changed 已含 DOM 指纹；Action 参数校验与 BrowserTool 异常边界已加固。遗留项：bbox 未启用
-- **V0.3（已完成）备注：** `llm/`（base/mock/openai_client）与 `prompts/`（planner.py 序列化/提示词/解析）已实现；`LLMPlanner` 可替换 RuleBasedPlanner（两者可并存，便于离线回归与 fallback）；Agent `run()` 已通过 `plan_with_history()` 传入历史；`observe_simplified()` 暂由 `serialize_snapshot()` 取代（更结构化）。遗留项：真实 Provider 未做人工 smoke test（需 API Key）；Provider 采用 OpenAI 兼容协议，覆盖国内主流厂商预设（DeepSeek/Kimi/智谱/通义/豆包/千帆/星火）
+- **V0.3（已完成）备注：** `llm/`（base/mock/openai_client）与 `prompts/`（planner.py 序列化/提示词/解析）已实现；`LLMPlanner` 可替换 RuleBasedPlanner（两者可并存，便于离线回归与 fallback）；Agent `run()` 已通过 `plan_with_history()` 传入历史；`observe_simplified()` 暂由 `serialize_snapshot()` 取代（更结构化）。Provider 采用 OpenAI 兼容协议，覆盖国内主流厂商预设（DeepSeek/Kimi/智谱/通义/豆包/千帆/星火），连通性可用 `examples/check_llm_connectivity.py` 验证
 - **V0.4（已完成）备注：** Agent 失败重试（机械 1 次 → Reflection 1 次 → 后退/刷新恢复 → 中止）已完成；LLM 可重试错误（超时/限流/网络）指数退避自动重试已完成；停滞检测已完成（自由模式）；后退/刷新恢复已完成（`_recover_page()`：优先 back、失败降级 refresh，每 run 默认最多恢复 2 次，恢复后重新观察规划当前步骤）。V0.5 起正式进入 Memory 阶段
 - **V0.5 重点：** Agent 的 history 管理需要压缩和摘要策略
 

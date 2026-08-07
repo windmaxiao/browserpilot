@@ -112,16 +112,6 @@ agent-rpa/
 │   │   └── planner.py      # 系统/用户提示词 + Snapshot 序列化 + Action 解析
 │   └── tools/              # (预留) 辅助工具
 │
-├── agent/
-│   ├── __init__.py
-│   ├── logging.py          # setup_logging（控制台 + logs/ 按天滚动文件）
-│   ├── schema/             # Action / Observation / Snapshot 数据模型（无外部依赖）
-│   ├── browser/            # BrowserTool + BrowserManager + SnapshotGenerator
-│   ├── core/               # Agent 主循环 + Executor + Observer + Planner（规则/LLM/两阶段）
-│   ├── llm/                # LLMClient 协议 + Mock + OpenAI 兼容 Provider
-│   ├── prompts/            # 系统/用户提示词 + Snapshot 序列化 + Action 解析
-│   └── tools/              # (预留) 辅助工具
-│
 ├── examples/
 │   ├── manual_demo.py      # 手动模式 Demo —— 完整 RPA 流程（百度搜索+结果保存）
 │   ├── agent_demo.py       # 规则 Agent 模式 Demo —— 本地搜索页
@@ -229,6 +219,24 @@ python examples/llm_agent_demo.py "打开 <本地搜索页> 查找 北京时间"
 ```
 
 Demo 运行在本地受控搜索页（`search_page.html`），不涉及外网导航等高危操作；未配置 API Key 时给出明确提示，不发起任何请求。
+
+## V0.4 错误恢复与重试（Reflection）
+
+V0.4 解决长任务中的"失败了怎么办"，并引入**两阶段任务规划**：
+
+- **两阶段任务队列**（`TaskPlanner`）— `decompose()` 一次 LLM 调用把目标拆成 `TaskQueue`（`action` / `wait` / `verify` 三类步骤），`plan_step()` 携带「当前步骤 + 剩余步骤」分步决策；拆解失败自动回退自由模式。
+- **wait / verify 框架直执行** — 等待与验收类步骤由 Agent 直接处理（`wait(ms)` / URL、文本校验），不经过 LLM，节省调用；`wait` 步骤描述中可携带"3秒/五秒/3000ms"等，非法 ms 自动从描述兜底提取。
+- **失败混合重试** — Action 执行失败后：机械重试 1 次 → `Planner.reflect()` 失败反思（LLM 分析给出替代动作）1 次 → 页面恢复（`back` 优先、失败降级 `refresh`，每 run 最多 2 次）→ 仍失败则中止。
+- **LLM 可重试错误** — 超时 / 限流 / 网络错误按指数退避自动重试（默认 3 次）；内容层错误最多一次修复。
+- **停滞检测** — LLM 在自由模式连续 2 次 `wait` 且页面无变化时提前终止，避免空转。
+- **异常防护** — `_safe_observe()` / `_safe_execute()` 捕获浏览器关闭等异常，优雅返回失败 Observation；`BrowserManager.stop()` 每步独立异常隔离。
+
+```text
+步骤模式（TaskPlanner）：
+  Goal → decompose() → [wait, action, verify, ...] 队列
+  → 逐项执行：wait/verify 框架直执行，action 经 LLM 分步决策
+  → 队列耗尽即完成（无需 LLM 输出 done）
+```
 
 ## 快速开始
 
