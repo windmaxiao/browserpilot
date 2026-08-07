@@ -344,12 +344,17 @@ class RuleBasedPlanner(Planner):
 
     @staticmethod
     def _at_url(current: str, target: str) -> bool:
-        a, b = current.lower(), target.lower()
+        a, b = current.lower().rstrip("/"), target.lower().rstrip("/")
+        if not b:
+            return False
         if a == b:
             return True
-        if b.endswith("/") and a == b.rstrip("/"):
-            return True
-        return a.startswith(b)
+        if not a.startswith(b):
+            return False
+        # 边界检查：b 之后的字符必须是路径/查询/锚点分隔符，
+        # 排除 baidu.com.evil.com 对 baidu.com 的仿冒域名误判
+        rest = a[len(b):]
+        return rest == "" or rest[0] in "/?#"
 
     @staticmethod
     def _find_search_box(snapshot: Snapshot) -> Optional[ElementInfo]:
@@ -458,9 +463,10 @@ class LLMPlanner(Planner):
         """
         for attempt in range(self._llm_retries):
             try:
+                # 只记录摘要（模型/序号/长度），不输出完整提示词（含页面文本与目标）
                 logger.debug(
-                    "🧠 LLM 请求（模型: {} | 第 {} 次）\n--- system ---\n{}\n--- user ---\n{}",
-                    self._model, attempt + 1, system_prompt, user_prompt,
+                    "🧠 LLM 请求（模型: {} | 第 {} 次 | system {} 字符 | user {} 字符）",
+                    self._model, attempt + 1, len(system_prompt), len(user_prompt),
                 )
                 raw = await self._client.complete_json(
                     system_prompt=system_prompt,
@@ -688,16 +694,30 @@ _CN_DIGITS = {
 # 等待语义关键词：命中即视为"应拆为 wait 步骤"
 _WAIT_KEYWORDS = ("等待", "延时", "延迟", "wait")
 
-# 等待 + 中文数字秒（如"等待五秒"）
-_CN_SEC_RE = re.compile(r"[一两二三四五六七八九十]\s*秒")
+# 等待 + 中文数字秒（如"等待五秒"、"等待十五秒"）
+_CN_SEC_RE = re.compile(r"([一两二三四五六七八九十]+)\s*秒")
 # 等待 + 阿拉伯数字（秒/毫秒）
 _NUM_UNIT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(秒|s|毫秒|ms)")
+
+
+def _cn_int(text: str) -> int:
+    """中文数字 → 整数（支持 1~99：五=5、十=10、十五=15、二十=20、二十五=25）。"""
+    if not text:
+        return 0
+    if "十" not in text:
+        return _CN_DIGITS[text]
+    if text == "十":
+        return 10
+    head, _, tail = text.partition("十")
+    tens = _CN_DIGITS[head] if head else 1
+    ones = _CN_DIGITS[tail] if tail else 0
+    return tens * 10 + ones
 
 
 def _extract_wait_ms(description: str) -> Optional[int]:
     """从步骤描述中提取等待毫秒数；无法提取返回 None。
 
-    支持：阿拉伯数字（秒/毫秒）、中文数字（秒）。
+    支持：阿拉伯数字（秒/毫秒）、中文数字（秒，含 11~99）。
     """
     text = description.lower()
     m = _NUM_UNIT_RE.search(text)
@@ -706,7 +726,7 @@ def _extract_wait_ms(description: str) -> Optional[int]:
         return int(num * 1000) if m.group(2) in ("秒", "s") else int(num)
     m = _CN_SEC_RE.search(text)
     if m:
-        return _CN_DIGITS[m.group(0)[0]] * 1000
+        return _cn_int(m.group(1)) * 1000
     return None
 
 
@@ -762,9 +782,12 @@ def parse_decompose_response(raw: Optional[dict], goal: str) -> Optional[list[Ta
         params = params if isinstance(params, dict) else {}
         if kind == "wait":
             try:
-                params = {"ms": max(0, int(params.get("ms", 1000)))}
+                ms = max(0, int(params.get("ms", 1000)))
             except (TypeError, ValueError):
-                params = {"ms": 1000}
+                # 非纯数字 ms（如 "5秒"/"1.5"）→ 从描述兜底提取，避免静默回退 1000
+                ms = _extract_wait_ms(description)
+                ms = ms if ms is not None else 1000
+            params = {"ms": ms}
         elif kind == "verify":
             vtype = str(params.get("type", "text")).strip() or "text"
             params = {"type": vtype, "value": str(params.get("value", "")).strip()}

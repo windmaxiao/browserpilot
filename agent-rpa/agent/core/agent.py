@@ -221,7 +221,11 @@ class Agent:
 
             # 2. 框架直执行的步骤：wait / verify（不经过 LLM）
             if current.kind == "wait":
-                ms = int(current.params.get("ms", 1000))
+                try:
+                    ms = max(0, int(current.params.get("ms", 1000)))
+                except (TypeError, ValueError):
+                    # 手动构造队列可能出现非纯数字 ms → 兜底 1000（正常链路已归一化）
+                    ms = 1000
                 action = Action(action="wait", params={"ms": ms})
                 logger.info(
                     "⏱️  [Step {}] 计划内等待 {}ms（{}）",
@@ -248,6 +252,13 @@ class Agent:
                     logger.info(
                         "✅ [Step {}] 步骤验收通过: {}", self._current_step, current.description,
                     )
+                    # 与 wait/action 步骤保持一致，验收结果也写入 history
+                    # （history["action"] 恒为 Action 对象，供序列化与 demo 展示）
+                    self._history.append({
+                        "step": self._current_step,
+                        "action": Action(action="verify", value=current.description),
+                        "observation": Observation.ok(url=snapshot.url, title=snapshot.title),
+                    })
                     queue.pop()
                     continue
                 logger.warning(
@@ -436,9 +447,9 @@ class Agent:
         Returns:
             True 表示页面已恢复，可重新观察；False 表示恢复不可用。
         """
-        tool = self._executor._tool
+        # 走 Executor 公开分发（_execute_back/_execute_refresh），避免直接访问私有属性 _tool
         try:
-            back_obs = await tool.back()
+            back_obs = await self._executor.execute(Action(action="back"))
             if back_obs is not None and not back_obs.is_error:
                 logger.info("🔄 页面恢复: 后退成功 | URL: {}", back_obs.url)
                 await asyncio.sleep(0.5)
@@ -447,7 +458,7 @@ class Agent:
         except Exception as e:
             logger.debug("后退恢复不可用: {}", e)
         try:
-            refresh_obs = await tool.refresh()
+            refresh_obs = await self._executor.execute(Action(action="refresh"))
             if refresh_obs is not None and not refresh_obs.is_error:
                 logger.info("🔄 页面恢复: 刷新成功")
                 return True

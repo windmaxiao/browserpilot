@@ -284,5 +284,8 @@ class Executor:
         if target in _HTML_TAGS:
             return target
 
-        safe = target.replace('"', '\\"')
+        # 与 SnapshotGenerator._css_escape_string 保持一致：
+        # 先归一化换行/制表符，再转义反斜杠与双引号，避免 CSS 解析错误与转义漂移
+        safe = target.replace("\r\n", " ").replace("\n", " ").replace("\r", " ").replace("\t", " ")
+        safe = safe.replace("\\", "\\\\").replace('"', '\\"')
         return f':has-text("{safe}")'

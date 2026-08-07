@@ -113,12 +113,15 @@ def serialize_snapshot(
     *,
     max_elements: int = _DEFAULT_MAX_ELEMENTS,
     max_text_length: int = _DEFAULT_MAX_TEXT_LENGTH,
+    max_text_elements: int = 10,
 ) -> dict[str, Any]:
     """Snapshot → LLM 上下文（紧凑 dict，不含整页 HTML）。
 
     - 只包含可交互元素与有限页面元信息。
     - 元素数量超过 ``max_elements`` 时截断并显式标记 ``elements_truncated``。
     - URL 经 :func:`sanitize_url` 脱敏。
+    - 附带正文摘要（h1-p 等文本，前 ``max_text_elements`` 条，同样截断），
+      帮助模型基于正文判断页面内容与任务完成条件。
     """
     elements = snapshot.get_interactive_elements()
     truncated = len(elements) > max_elements
@@ -135,6 +138,9 @@ def serialize_snapshot(
     }
     if truncated:
         data["elements_truncated"] = True
+    page_texts = [el.text for el in snapshot.texts if el.text][:max_text_elements]
+    if page_texts:
+        data["page_text"] = [_truncate(t, max_text_length) for t in page_texts]
     return data
 
 
@@ -163,7 +169,8 @@ def serialize_history(
     """将 Agent 历史压缩为最近窗口内的摘要列表（V0.3 只保留滑动窗口）。
 
     每个条目只保留 action 类型 / 目标 / 成功与否 / 结果 URL，
-    剔除截图 base64、下载路径、异常堆栈等敏感或冗余内容。
+    剔除截图 base64、下载路径、异常堆栈等敏感或冗余内容；
+    URL 与当前 Snapshot 一致，经 :func:`sanitize_url` 脱敏。
     """
     window = history[-max_items:] if max_items > 0 else history
     out: list[dict[str, Any]] = []
@@ -175,7 +182,7 @@ def serialize_history(
             "target": getattr(action, "target", None),
             "target_id": getattr(action, "target_id", None),
             "success": getattr(observation, "success", None),
-            "url": getattr(observation, "url", None),
+            "url": sanitize_url(getattr(observation, "url", None)) if observation else None,
         })
     return out
 

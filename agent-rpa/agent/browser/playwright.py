@@ -117,10 +117,15 @@ class BrowserTool:
             old_pages = self._current_pages()
             await locator.click(force=force, timeout=timeout)
             await self._smart_wait()
-            new_page = await self._detect_new_page(old_pages)
+            new_url = self._page.url
+            if new_url == old_url:
+                # URL 未变化 → 可能打开了新标签页，短轮询检测（快速失败，避免每次点击固定等待）
+                new_page = await self._detect_new_page(old_pages)
+            else:
+                # URL 已变化 → 同页导航发生，无需检测新标签页
+                new_page = None
             if new_page is not None:
                 return await self._switch_to_page(new_page)
-            new_url = self._page.url
             new_title = await self._page.title()
             new_fp = await self._page_fingerprint()
             elapsed = time.time() - start
@@ -423,12 +428,13 @@ class BrowserTool:
             return set()
 
     async def _detect_new_page(
-        self, old_pages: set, timeout: float = 3.0
+        self, old_pages: set, timeout: float = 1.0
     ) -> Optional[Page]:
         """点击后若打开了新标签页则返回该 Page，否则返回 None。
 
         新标签页创建存在延迟（JS/浏览器行为），故采用轮询等待而非只查一次：
         百度等站点点击 target=_blank 链接后，新 Page 可能数百毫秒后才出现。
+        为避免每次点击都固定等待，默认轮询窗口已缩短为 1.0s（快速失败）。
         """
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -555,16 +561,32 @@ class BrowserManager:
             raise
 
     async def stop(self):
-        """关闭浏览器"""
+        """关闭浏览器
+
+        每步独立 try/except：单个资源关闭失败（如页面已被外部关闭）时，
+        不中断其余资源清理，避免浏览器进程与驱动连接泄漏。
+        """
         logger.info("🛑 关闭浏览器...")
         if self._page:
-            await self._page.close()
+            try:
+                await self._page.close()
+            except Exception as e:
+                logger.warning("⚠️ 关闭页面失败: {}", e)
         if self._context:
-            await self._context.close()
+            try:
+                await self._context.close()
+            except Exception as e:
+                logger.warning("⚠️ 关闭 context 失败: {}", e)
         if self._browser:
-            await self._browser.close()
+            try:
+                await self._browser.close()
+            except Exception as e:
+                logger.warning("⚠️ 关闭浏览器失败: {}", e)
         if self._playwright:
-            await self._playwright.stop()
+            try:
+                await self._playwright.stop()
+            except Exception as e:
+                logger.warning("⚠️ 停止 Playwright 失败: {}", e)
         logger.info("✅ 浏览器已关闭")
 
     @property

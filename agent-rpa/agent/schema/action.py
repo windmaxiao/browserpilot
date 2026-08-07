@@ -207,15 +207,15 @@ def select(target: str, option: str, **kwargs) -> Action:
     return Action(action="select", target=target, value=option, **kwargs)
 
 
-def scroll(direction: str = "down", amount: int = 300, **kwargs) -> Action:
+def scroll(direction: str = "down", amount: int = 300) -> Action:
     return Action(
         action="scroll",
-        params={"direction": direction, "amount": amount, **kwargs},
+        params={"direction": direction, "amount": amount},
     )
 
 
-def wait(ms: int = 1000, **kwargs) -> Action:
-    return Action(action="wait", params={"ms": ms, **kwargs})
+def wait(ms: int = 1000) -> Action:
+    return Action(action="wait", params={"ms": ms})
 
 
 def done(summary: str = "") -> Action:

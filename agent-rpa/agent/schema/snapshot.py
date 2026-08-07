@@ -125,7 +125,9 @@ class Snapshot:
         return self.buttons + self.inputs + self.links + self.selects
 
     def find(self, text: str) -> list[ElementInfo]:
-        """按文本搜索元素"""
+        """按文本搜索元素（空文本不匹配任何元素）"""
+        if not text:
+            return []
         results: list[ElementInfo] = []
         for el in self.get_interactive_elements():
             if text.lower() in el.text.lower():

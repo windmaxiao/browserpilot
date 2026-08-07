@@ -284,7 +284,13 @@ class SnapshotGenerator:
 
     @staticmethod
     def _css_escape_string(value: str) -> str:
-        """将属性值转义为合法的 CSS 字符串字面量（用于 [attr="..."] 选择器）。"""
+        """将属性值转义为合法的 CSS 字符串字面量（用于 [attr="..."] 选择器）。
+
+        换行/制表符在 CSS 字符串字面量中非法（裸换行直接导致解析失败），
+        统一替换为空格；Playwright 的 :has-text 匹配本身会做空白归一化，
+        因此语义不受影响。
+        """
+        value = value.replace("\r\n", " ").replace("\n", " ").replace("\r", " ").replace("\t", " ")
         return value.replace("\\", "\\\\").replace('"', '\\"')
 
     @staticmethod
@@ -346,6 +352,6 @@ class SnapshotGenerator:
             return "table"
         if any(k in url or k in title for k in ("form", "edit", "create", "表单")):
             return "form"
-        if any(k in url or k in title for k in ("detail", "detail", "详情")):
+        if any(k in url or k in title for k in ("detail", "详情")):
             return "detail"
         return "unknown"
