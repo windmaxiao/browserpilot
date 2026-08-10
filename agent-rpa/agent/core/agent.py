@@ -514,7 +514,7 @@ class Agent:
 
     @staticmethod
     def _verify_step(snapshot: Snapshot, step: TaskStep) -> bool:
-        """校验步骤验收条件：verify.type=url → URL 包含；text → 标题/元素文本包含。"""
+        """校验步骤验收条件：verify.type=url → URL 包含；text → 标题/元素/正文文本包含。"""
         value = step.params.get("value", "")
         if not value:
             return False
@@ -524,6 +524,8 @@ class Agent:
         haystack = f"{snapshot.title or ''} " + " ".join(
             el.text for el in snapshot.get_interactive_elements()
         )
+        # 与 RuleBasedPlanner._page_contains 对齐：正文文本（h1-h6/p/span 等）也纳入验收
+        haystack += " " + " ".join(el.text for el in snapshot.texts)
         return value.lower() in haystack.lower()
 
     def _log_snapshot(self, snapshot: Snapshot):

@@ -374,6 +374,29 @@ async def test_step_mode_verify_pass_and_fail():
 
 
 @pytest.mark.asyncio
+async def test_step_mode_verify_matches_body_text():
+    """验收文本仅出现在正文（snapshot.texts）时也能通过（与 _page_contains 对齐）"""
+    from agent.core.planner import TaskStep
+
+    snap = Snapshot(
+        title="结果页",
+        url="https://example.com/result",
+        texts=[ElementInfo(text="已找到关于 北京时间 的结果", element_id="e9",
+                           tag="p", element_type="text")],
+    )
+    agent, planner, tool = make_step_agent(
+        [TaskStep(description="验收", kind="verify",
+                  params={"type": "text", "value": "北京时间"})],
+        snapshot=snap,
+    )
+
+    obs = await agent.run("任务")
+
+    assert obs.success is True
+    assert planner.plan_calls == []      # verify 步骤不经过 planner
+
+
+@pytest.mark.asyncio
 async def test_observer_exception_returns_graceful_fail():
     """观察页面抛异常（浏览器被关闭）→ Agent 优雅失败而非崩溃"""
     observer = MagicMock()
