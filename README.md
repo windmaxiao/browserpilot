@@ -72,7 +72,7 @@ python examples/baidu_demo.py
 python examples/llm_agent_demo.py
 python examples/llm_baidu_demo.py
 
-# 运行测试（14 个测试文件，303 个用例）
+# 运行测试（15 个测试文件，321 个用例）
 pytest
 ```
 
@@ -86,7 +86,7 @@ pytest
 | V0.2 | Agent Loop：规则驱动 Planner + 执行契约加固 | ✅ 完成 |
 | V0.3 | 接入 LLM：LLM Planner | ✅ 完成 |
 | V0.4 | Reflection：错误恢复与重试（失败重试 / Reflection / 后退刷新恢复 / LLM 重试） | ✅ 完成 |
-| V0.5 | Memory：历史操作与上下文记忆 | 📋 待开始 |
+| V0.5 | Memory：历史操作与上下文记忆（增量摘要 + 滑动窗口 + 上下文压缩） | ✅ 完成 |
 | V1.0 | 完整 Agentic RPA：登录/查询/下载/上传/Excel 处理 | 🎯 规划中 |
 
 ## 授权

@@ -21,6 +21,7 @@ from typing import Optional
 from loguru import logger
 
 from agent.core.executor import Executor
+from agent.core.memory import HistoryMemory
 from agent.core.observer import Observer
 from agent.core.planner import Planner, TaskQueue, TaskStep
 from agent.schema.action import Action, done
@@ -54,6 +55,7 @@ class Agent:
 
         # 运行时状态
         self._history: list[dict] = []
+        self._memory: HistoryMemory = HistoryMemory()
         self._current_step: int = 0
         self._goal: str = ""
         self._recovery_count: int = 0
@@ -64,8 +66,13 @@ class Agent:
 
     @property
     def history(self) -> list[dict]:
-        """返回历史操作记录"""
+        """返回历史操作记录（原始完整列表）"""
         return list(self._history)
+
+    @property
+    def memory(self) -> HistoryMemory:
+        """增量式历史记忆（V0.5）：摘要 + 滑动窗口 + 上下文压缩"""
+        return self._memory
 
     @property
     def current_step(self) -> int:
@@ -93,6 +100,7 @@ class Agent:
         """
         self._goal = goal
         self._history.clear()
+        self._memory.clear()
         self._current_step = 0
         self._recovery_count = 0
 
@@ -123,8 +131,11 @@ class Agent:
 
             # 2. Plan
             logger.info("📝 [Step {}/{}] 规划动作...", self._current_step, self._max_steps)
-            # V0.3 起通过 plan_with_history 传入有限历史（基类默认忽略历史转发 plan）
-            action = await self._planner.plan_with_history(snapshot, goal, self._history)
+            # V0.3 起通过 plan_with_history 传入有限历史；
+            # V0.5 起传入记忆压缩上下文（摘要 + 最近窗口，基类默认忽略历史转发 plan）
+            action = await self._planner.plan_with_history(
+                snapshot, goal, self._memory.context_entries(),
+            )
 
             if action is None:
                 logger.warning("⚠️  [Step {}] 无法规划出有效动作", self._current_step)
@@ -152,12 +163,8 @@ class Agent:
                     error=f"在第 {self._current_step} 步动作执行异常（浏览器可能已关闭）",
                 )
 
-            # 5. Record history
-            self._history.append({
-                "step": self._current_step,
-                "action": final_action,
-                "observation": observation,
-            })
+            # 5. Record history（V0.5 起同步写入记忆，供上下文压缩）
+            await self._record_step(self._current_step, final_action, observation)
 
             # 6. Check failure（重试与 Reflection 均失败 → 尝试页面恢复，仍失败则中止）
             if observation.is_error:
@@ -236,11 +243,7 @@ class Agent:
                     return Observation.fail(
                         error=f"在第 {self._current_step} 步动作执行异常（浏览器可能已关闭）",
                     )
-                self._history.append({
-                    "step": self._current_step,
-                    "action": action,
-                    "observation": observation,
-                })
+                await self._record_step(self._current_step, action, observation)
                 if observation.is_error:
                     return observation
                 queue.pop()
@@ -254,11 +257,11 @@ class Agent:
                     )
                     # 与 wait/action 步骤保持一致，验收结果也写入 history
                     # （history["action"] 恒为 Action 对象，供序列化与 demo 展示）
-                    self._history.append({
-                        "step": self._current_step,
-                        "action": Action(action="verify", value=current.description),
-                        "observation": Observation.ok(url=snapshot.url, title=snapshot.title),
-                    })
+                    await self._record_step(
+                        self._current_step,
+                        Action(action="verify", value=current.description),
+                        Observation.ok(url=snapshot.url, title=snapshot.title),
+                    )
                     queue.pop()
                     continue
                 logger.warning(
@@ -275,7 +278,7 @@ class Agent:
                 self._current_step, len(queue), current.description,
             )
             action = await self._planner.plan_step(
-                snapshot, goal, self._history,
+                snapshot, goal, self._memory.context_entries(),
                 steps=queue.steps(), current_index=queue.index,
             )
 
@@ -303,12 +306,8 @@ class Agent:
                     error=f"在第 {self._current_step} 步动作执行异常（浏览器可能已关闭）",
                 )
 
-            # 5. Record history
-            self._history.append({
-                "step": self._current_step,
-                "action": final_action,
-                "observation": observation,
-            })
+            # 5. Record history（V0.5 起同步写入记忆，供上下文压缩）
+            await self._record_step(self._current_step, final_action, observation)
 
             # 6. Check failure（重试与 Reflection 均失败 → 尝试页面恢复，仍失败则中止）
             if observation.is_error:
@@ -369,6 +368,19 @@ class Agent:
 
     # ── 内部方法 ────────────────────────────────────────────────────
 
+    async def _record_step(
+        self, step: int, action: Action, observation: Observation,
+    ) -> None:
+        """记录一步历史：写入原始历史与增量记忆（V0.5）。
+
+        entry 同时被 ``Agent.history``（完整原始列表）与 ``HistoryMemory``
+        （只读引用）持有；写入后触发记忆折叠，超出窗口的旧批次被压缩为摘要。
+        """
+        entry = {"step": step, "action": action, "observation": observation}
+        self._history.append(entry)
+        self._memory.add(entry)
+        await self._memory.maybe_summarize()
+
     async def _safe_observe(self) -> Optional[Snapshot]:
         """观察页面；浏览器被关闭等异常时返回 None 而非抛崩溃。"""
         try:
@@ -427,7 +439,7 @@ class Agent:
             logger.warning("⚠️  [Step {}] Planner 不支持 Reflection，放弃该步", step)
             return retry, action
         reflect_action = await reflect_fn(
-            snapshot, self._goal, self._history, action, retry.error or ""
+            snapshot, self._goal, self._memory.context_entries(), action, retry.error or ""
         )
         if reflect_action is None:
             logger.warning("⚠️  [Step {}] Reflection 无替代动作，放弃该步", step)

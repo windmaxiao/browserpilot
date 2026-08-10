@@ -25,6 +25,8 @@ browserpilot/
 ├── 使用文档.md                         # 面向使用者的安装/运行/规则引擎指南
 ├── V0.2开发计划.md                     # V0.2 开发计划（✅ 已完成）
 ├── V0.3开发计划.md                     # V0.3 开发计划（✅ 已完成）
+├── V0.5开发计划.md                     # V0.5 开发计划（✅ 已完成）
+├── V0.5开发计划.md                     # V0.5 开发计划（✅ 已完成）
 ├── Agentic_RPA_项目规划_V0.1.md        # 原始项目规划文档
 ├── README.md                          # 项目入口 README
 ├── LICENSE                            # Apache License 2.0
@@ -53,6 +55,7 @@ browserpilot/
     │   │   ├── __init__.py
     │   │   ├── agent.py               #   Agent 主循环（步骤/自由双模式 + 异常防护）
     │   │   ├── executor.py            #   Action → BrowserTool 翻译层
+    │   │   ├── memory.py              #   HistoryMemory 增量式记忆（V0.5：摘要+窗口+压缩）
     │   │   ├── observer.py            #   SnapshotGenerator 的 Agent 包装
     │   │   └── planner.py             #   Planner 基类 + RuleBasedPlanner（8 条规则）
     │   │                               #   + LLMPlanner + TaskPlanner（两阶段）+ TaskStep/TaskQueue
@@ -77,7 +80,7 @@ browserpilot/
     │   ├── check_llm_connectivity.py  # 7 家国内大模型预设连通性测试
     │   └── search_page.html           # 本地确定性搜索页
     │
-    └── tests/                         # 14 个文件，303 个用例
+    └── tests/                         # 15 个文件，321 个用例
         ├── __init__.py
         ├── test_action.py             # Action Schema + 参数校验
         ├── test_observation.py        # Observation Schema
@@ -91,6 +94,8 @@ browserpilot/
         ├── test_llm_client.py         # LLMClient 协议 / Mock / 错误分类
         ├── test_prompt_serialization.py      # Snapshot 序列化 / URL 脱敏 / 历史窗口
         ├── test_llm_planner.py        # LLMPlanner 解析 / 一次修复 / 完整链路
+        ├── test_memory.py             # Memory 摘要/折叠/上下文压缩（V0.5）
+        ├── test_memory.py             # Memory 摘要/折叠/上下文压缩（V0.5）
         ├── test_logging.py            # setup_logging 控制台 / 文件 sink
         └── test_task_queue.py         # TaskStep/TaskQueue/拆解解析/TaskPlanner
 ```
@@ -312,6 +317,8 @@ class Agent:
 - Planner 返回 None 表示无法规划
 - **异常防护**：`_safe_observe()` / `_safe_execute()` 捕获浏览器关闭等异常，优雅返回失败 Observation 而非崩溃
 - **停滞检测**：LLM 在 action 步骤中连续 2 次 wait 且页面无变化 → 提前终止；计划内 wait 步骤不计入
+- **历史记忆（V0.5）**：每步经 `_record_step()` 写入原始历史与 `HistoryMemory`，`plan_with_history` / `plan_step` / `reflect` 传 `memory.context_entries()`（摘要 + 最近窗口）而非原始全量历史
+- **历史记忆（V0.5）**：每步经 `_record_step()` 写入原始历史与 `HistoryMemory`，`plan_with_history` / `plan_step` / `reflect` 传 `memory.context_entries()`（摘要 + 最近窗口）而非原始全量历史
 
 #### `executor.py` — Executor（Action → BrowserTool 翻译层）
 
@@ -369,7 +376,34 @@ class Observer:
 7. 结果首条链接 → `click`
 8. 兜底等待（结果未渲染）→ `wait`
 
+#### `memory.py` — HistoryMemory（V0.5 Memory）
+
+增量式历史记忆：解决长任务中滑动窗口丢弃早期上下文的问题。
+
+| 方法/属性 | 说明 |
+|----|------|
+| `summarize_entries(entries)` | 规则式摘要纯函数：每条历史压缩为一行「动作 目标 → 结果」；不含输入值/URL 等敏感内容 |
+| `add(entry)` | 追加一条历史（与 `Agent.history` 共享引用，只读） |
+| `maybe_summarize()` | 达到 `window + batch` 阈值时把最旧一批折叠为摘要（每条目只摘要一次，增量） |
+| `context_entries()` | 压缩上下文 = `[摘要?]` + `[最近窗口]`，摘要不占窗口名额 |
+| `summary` / `recent` / `count` / `clear()` | 摘要文本 / 未折叠条目 / 总数 / 重置 |
+
+- 默认 `window=5, batch=10`；可注入异步摘要器（`async (entries) -> str`，如 LLM 摘要）替换规则式默认。
+- Agent 每步经 `_record_step()` 写入记忆并触发折叠；`plan_with_history` / `plan_step` / `reflect` 改传 `context_entries()`。
+- 序列化协议：内存条目 `{"kind": "summary", "text": ...}` → prompts 层渲染为 `{"summary": ...}` 且恒在头部。
+
 ---
+
+#### `memory.py` — HistoryMemory（V0.5 Memory）
+
+增量式历史记忆：超出滑动窗口的旧条目按批折叠为摘要（默认 `window=5, batch=10`，每条目只摘要一次），`context_entries()` 输出「摘要 + 最近窗口」压缩上下文（摘要不占窗口名额）。
+
+| 成员 | 说明 |
+|------|------|
+| `summarize_entries()` | 规则式摘要纯函数：每条历史 → 一行「动作 目标 → 结果」，不含输入值/URL 等敏感内容 |
+| `add(entry)` / `maybe_summarize()` | 同步写入原始条目；达到 `window + batch` 阈值时折叠最旧一批（可注入 async LLM 摘要器替换默认规则式） |
+| `context_entries()` | 压缩上下文 = `[{"kind": "summary", "text": ...}]` + 最近窗口条目，供 Planner 序列化 |
+| `clear()` / `count` / `summary` / `recent` | 生命周期与只读视图 |
 
 ### 4.4 LLM 层 (`agent/llm/`) 与 Prompts 层 (`agent/prompts/`) — V0.3
 
@@ -407,7 +441,7 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 | `serialize_snapshot()` | Snapshot → 模型视图（只含可交互元素，脱敏 + 截断，元素超限标记 `elements_truncated`） |
 | `sanitize_url()` | 移除 fragment；token/session/code 等查询参数值掩码为 `***` |
 | `find_element_by_id()` | 当前 Snapshot 内 `element_id → ElementInfo` 映射（只含可见元素） |
-| `serialize_history()` | 历史压缩为最近窗口摘要（默认 5 条，剔除截图/下载路径/堆栈） |
+| `serialize_history()` | 历史压缩为「摘要 + 最近窗口」（V0.3 滑动窗口 5 条 + V0.5 摘要条目渲染，剔除截图/下载路径/堆栈） |
 | `build_action_schema()` | 模型输出 schema，action 枚举与 `Action.validate()` 同源 |
 | `parse_action_dict()` | 模型 dict → 已验证 Action：伪造 selector 忽略、target_id 必须命中、未知字段丢弃 |
 
@@ -415,9 +449,9 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 
 ---
 
-## 五、当前状态 (V0.3)
+## 五、当前状态 (V0.5)
 
-### 已完成（V0.1 + V0.2 + V0.3）
+### 已完成（V0.1 ~ V0.5）
 
 - ✅ 12 种 Action 类型定义 + 工厂函数 + 参数验证
 - ✅ Observation 统一返回格式
@@ -436,7 +470,8 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 - ✅ **异常防护（V0.4 前瞻）**：`_safe_observe()` / `_safe_execute()` 浏览器关闭时优雅失败；停滞检测（LLM 连续 2 次 wait 且页面无变化提前终止）
 - ✅ **Reflection 重试（V0.4）**：Agent 执行失败混合重试（机械 1 次 → `Planner.reflect()` 失败反思给出替代动作 1 次 → 仍失败尝试页面恢复 → 中止）；LLM 可重试错误（超时/限流/网络）指数退避自动重试（默认 3 次）；等待步骤框架兜底（拆解误拆 action 时按描述自动纠正为 wait 并提取毫秒）；**后退/刷新恢复**（失败后自动 back/refresh 重置页面状态再重新规划，默认最多 2 次）
 - ✅ **工程化增强**：`setup_logging`（控制台 + `logs/` 按天滚动文件）、Snapshot 生成并行化提速（asyncio.gather 双层并发）、新标签页轮询跟随、`.env` 零依赖加载链
-- ✅ 14 个测试文件，303 个用例（Schema / Executor / Planner / BrowserTool / SnapshotGenerator / Agent 集成 / LLMClient / 序列化 / LLMPlanner / Logging / TaskQueue）
+- ✅ **Memory（V0.5）**：`HistoryMemory` 增量式历史记忆（滚动摘要：超出窗口的旧条目按批折叠，默认 `window=5, batch=10`，可注入异步 LLM 摘要器）、`summarize_entries()` 规则式摘要（不含输入值/URL 等敏感内容）、上下文压缩（`context_entries()` = 摘要 + 最近窗口，摘要不占窗口名额）、`serialize_history` / `build_user_prompt` 摘要协议、Agent `_record_step()` 同步记录 + `plan_with_history` / `plan_step` / `reflect` 传压缩上下文
+- ✅ 15 个测试文件，321 个用例（Schema / Executor / Planner / BrowserTool / SnapshotGenerator / Agent 集成 / LLMClient / 序列化 / LLMPlanner / Memory / Logging / TaskQueue）
 - ✅ 5 个 Demo（手动 / 规则 Agent 本地页 / 规则 Agent 百度 / LLM Agent 自由模式 / LLM Agent 两阶段真实百度，端到端跑通）
 
 ### 已知问题（详见 [待解决问题.md](待解决问题.md)，下表为摘要）
@@ -476,15 +511,15 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 | **V0.2** | Agent Loop：规则驱动 Planner + 执行契约加固 | `RuleBasedPlanner` 规则引擎（目标解析：URL/搜索词/点击目标/等待条件 + 8 条内置规则）；Snapshot 不可见元素过滤 + selector CSS 转义 + element_id 生命周期；click() page_changed DOM 指纹检测；Action 参数校验完整化；BrowserTool 异常边界统一 | ✅ 完成 |
 | **V0.3** | 接入 LLM：LLM Planner | `LLMClient` 协议 + 错误分类；`MockLLMClient` + `OpenAILLMClient`；`LLMPlanner`（Snapshot 脱敏序列化 → 提示词 → 安全 Action 转换 + 一次修复）；Agent `plan_with_history()` 传历史 | ✅ 完成 |
 | **V0.4** | Reflection：错误恢复与重试 | 任务步骤队列（TaskPlanner decompose→分步执行）；wait/verify 框架直执行；停滞检测；浏览器关闭异常防护；**Agent 失败重试**（机械 1 次 → Reflection 1 次 → 页面恢复 → 中止）；**LLM 可重试错误自动重试**（指数退避）；等待步骤框架兜底（action→wait 纠正）；**后退/刷新恢复** | ✅ 完成 |
-| **V0.5** | Memory：历史操作与上下文记忆 | 摘要式记忆；滑动窗口；上下文压缩 | 📋 待开始 |
+| **V0.5** | Memory：历史操作与上下文记忆 | `HistoryMemory` 增量式记忆（滚动摘要：窗口外旧条目按批折叠，默认 window=5/batch=10，可注入异步 LLM 摘要器）；`summarize_entries()` 规则式摘要；`context_entries()` 上下文压缩（摘要 + 窗口）；`serialize_history` / `build_user_prompt` 摘要协议；Agent 记录与传参接线 | ✅ 完成 |
 | **V1.0** | 完整 Agentic RPA | 登录/查询/下载/上传/Excel 长流程 | 🎯 规划中 |
 
 ### 各版本关键关注点
 
 - **V0.2（已完成）备注：** Snapshot 不可见元素过滤、selector CSS 转义与优先级（2.3）、element_id 生命周期重置已完成；`RuleBasedPlanner` 8 条规则已完成（含点击目标、等待条件）；click() page_changed 已含 DOM 指纹；Action 参数校验与 BrowserTool 异常边界已加固。遗留项：bbox 未启用
 - **V0.3（已完成）备注：** `llm/`（base/mock/openai_client）与 `prompts/`（planner.py 序列化/提示词/解析）已实现；`LLMPlanner` 可替换 RuleBasedPlanner（两者可并存，便于离线回归与 fallback）；Agent `run()` 已通过 `plan_with_history()` 传入历史；`observe_simplified()` 暂由 `serialize_snapshot()` 取代（更结构化）。Provider 采用 OpenAI 兼容协议，覆盖国内主流厂商预设（DeepSeek/Kimi/智谱/通义/豆包/千帆/星火），连通性可用 `examples/check_llm_connectivity.py` 验证
-- **V0.4（已完成）备注：** Agent 失败重试（机械 1 次 → Reflection 1 次 → 后退/刷新恢复 → 中止）已完成；LLM 可重试错误（超时/限流/网络）指数退避自动重试已完成；停滞检测已完成（自由模式）；后退/刷新恢复已完成（`_recover_page()`：优先 back、失败降级 refresh，每 run 默认最多恢复 2 次，恢复后重新观察规划当前步骤）。V0.5 起正式进入 Memory 阶段
-- **V0.5 重点：** Agent 的 history 管理需要压缩和摘要策略
+- **V0.4（已完成）备注：** Agent 失败重试（机械 1 次 → Reflection 1 次 → 后退/刷新恢复 → 中止）已完成；LLM 可重试错误（超时/限流/网络）指数退避自动重试已完成；停滞检测已完成（自由模式）；后退/刷新恢复已完成（`_recover_page()`：优先 back、失败降级 refresh，每 run 默认最多恢复 2 次，恢复后重新观察规划当前步骤）
+- **V0.5（已完成）备注：** `HistoryMemory`（`agent/core/memory.py`）增量式记忆已完成：超出窗口的旧条目按批折叠为摘要（默认 window=5/batch=10，每条目只摘要一次），`context_entries()` 输出「摘要 + 最近窗口」压缩上下文；`serialize_history` / `build_user_prompt` 支持摘要条目（渲染为 `{"summary": ...}` 且恒在头部、不占窗口）；Agent 每步经 `_record_step()` 记录并触发折叠，向 `plan_with_history` / `plan_step` / `reflect` 传压缩上下文，`Agent.history` 仍保留完整原始列表。摘要只含 action/target/成功与否，不含输入值/URL 等敏感内容。V1.0 可在此基础上做跨任务持久化记忆
 
 ---
 
@@ -500,6 +535,8 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 - **序列化测试（现有）：** 上下文不含 selector/HTML/Cookie、URL 脱敏、元素/文本截断、序列化稳定、element_id 映射、历史窗口
 - **LLMPlanner 测试（现有）：** 合法 Action、幻觉 ID、伪造 selector、非法 action、数组输出、一次修复恢复、连续失败停止、可重试错误不重试
 - **Logging 测试（现有）：** setup_logging 控制台 / 文件 sink 行为
+- **Memory 测试（现有）：** 规则式摘要格式化与敏感字段排除、HistoryMemory 折叠阈值 / 增量只摘要一次 / 窗口边界 / clear / 自定义摘要器、serialize_history / build_user_prompt 摘要协议与纯列表回归、Agent 长任务向 Planner 传摘要且 history 原始完整
+- **Memory 测试（现有）：** 规则式摘要格式化与敏感字段排除、HistoryMemory 折叠阈值 / 增量只摘要一次 / 窗口边界 / clear / 自定义摘要器、serialize_history / build_user_prompt 摘要协议与纯列表回归、Agent 长任务向 Planner 传摘要且 history 原始完整
 - **TaskQueue 测试（现有）：** 队列消费顺序、拆解解析（wait 毫秒归一 / verify 参数 / 非法条目过滤）、TaskPlanner 拆解失败回退、plan_step 步骤上下文注入
 
 ### 运行测试
@@ -547,6 +584,7 @@ pytest                     # 运行全部测试
 | 修改浏览器操作 | `agent/browser/playwright.py` |
 | 修改 Agent 主逻辑 | `agent/core/agent.py` |
 | 修改规划逻辑 | `agent/core/planner.py` |
+| 修改记忆/上下文压缩 | `agent/core/memory.py` + `agent/prompts/planner.py` |
 | 添加测试 | `tests/` 下对应文件 |
 
 ---

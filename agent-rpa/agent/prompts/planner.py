@@ -161,19 +161,44 @@ def find_element_by_id(
 
 # ── 历史窗口 ────────────────────────────────────────────────────────
 
+def _split_summary(history: list) -> tuple[Optional[str], list]:
+    """从历史条目中拆出摘要文本与常规条目（V0.5 Memory）。
+
+    摘要条目形如 ``{"kind": "summary", "text": "..."}``，恒在列表头部且不占窗口；
+    普通条目保持原样。无摘要时返回 (None, 原列表)。
+    """
+    summary: list[str] = []
+    rest: list = []
+    for entry in history:
+        if isinstance(entry, dict) and entry.get("kind") == "summary":
+            text = str(entry.get("text", "")).strip()
+            if text:
+                summary.append(text)
+        else:
+            rest.append(entry)
+    return ("\n".join(summary) if summary else None), rest
+
+
 def serialize_history(
     history: list[dict],
     *,
     max_items: int = _DEFAULT_MAX_HISTORY,
 ) -> list[dict[str, Any]]:
-    """将 Agent 历史压缩为最近窗口内的摘要列表（V0.3 只保留滑动窗口）。
+    """将 Agent 历史压缩为「摘要 + 最近窗口」的模型视图（V0.3 滑动窗口 + V0.5 摘要）。
 
-    每个条目只保留 action 类型 / 目标 / 成功与否 / 结果 URL，
+    每个常规条目只保留 action 类型 / 目标 / 成功与否 / 结果 URL，
     剔除截图 base64、下载路径、异常堆栈等敏感或冗余内容；
-    URL 与当前 Snapshot 一致，经 :func:`sanitize_url` 脱敏。
+    URL 经 :func:`sanitize_url` 脱敏。
+
+    V0.5 起支持摘要条目（:data:`HistoryMemory` 产出）：摘要渲染为
+    ``{"summary": text}`` 且恒在头部，不占窗口名额；纯列表（无摘要）
+    行为与 V0.3 完全一致。
     """
-    window = history[-max_items:] if max_items > 0 else history
+    summary, entries = _split_summary(history)
+    window = entries[-max_items:] if max_items > 0 else entries
     out: list[dict[str, Any]] = []
+    if summary:
+        out.append({"summary": summary})
     for entry in window:
         action = entry.get("action")
         observation = entry.get("observation")
@@ -249,15 +274,21 @@ def build_user_prompt(
     constraints: list[str] | None = None,
     max_history: int = _DEFAULT_MAX_HISTORY,
 ) -> str:
-    """构建用户提示词：目标 + Snapshot 模型视图 + 最近历史 + 可选约束。"""
+    """构建用户提示词：目标 + Snapshot 模型视图 + 最近历史 + 可选约束。
+
+    V0.5 起历史可能含摘要条目（``{"summary": ...}``），摘要恒保留在头部，
+    窗口只作用于常规条目。
+    """
     parts = [
         f"目标: {goal}",
         "当前页面:",
         json.dumps(snapshot_view, ensure_ascii=False),
     ]
     if history:
+        summary = [e for e in history if isinstance(e, dict) and e.get("summary")]
+        rest = [e for e in history if not (isinstance(e, dict) and e.get("summary"))]
         parts.append("最近历史:")
-        parts.append(json.dumps(history[-max_history:], ensure_ascii=False))
+        parts.append(json.dumps(summary + rest[-max_history:], ensure_ascii=False))
     if constraints:
         parts.append("约束: " + "; ".join(constraints))
     return "\n\n".join(parts)

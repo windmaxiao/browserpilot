@@ -121,7 +121,7 @@ agent-rpa/
 │   ├── check_llm_connectivity.py  # 7 家国内大模型连通性测试
 │   └── search_page.html    # 本地确定性搜索页（agent_demo 使用）
 │
-└── tests/                  # 14 个文件，303 个用例
+└── tests/                  # 15 个文件，321 个用例
     ├── test_action.py                    # Action Schema + 参数校验
     ├── test_observation.py               # Observation Schema
     ├── test_snapshot.py                  # Snapshot Schema + Generator 基础
@@ -134,6 +134,7 @@ agent-rpa/
     ├── test_llm_client.py                # LLMClient 协议 / Mock / 错误分类
     ├── test_prompt_serialization.py      # Snapshot 序列化 / URL 脱敏 / 历史窗口
     ├── test_llm_planner.py               # LLMPlanner 解析 / 一次修复 / 完整链路
+    ├── test_memory.py                    # Memory 摘要 / 折叠 / 上下文压缩（V0.5）
     ├── test_logging.py                   # setup_logging 控制台 / 文件
     └── test_task_queue.py                # TaskStep / TaskQueue / 拆解解析 / TaskPlanner
 ```
@@ -238,6 +239,22 @@ V0.4 解决长任务中的"失败了怎么办"，并引入**两阶段任务规�
   → 队列耗尽即完成（无需 LLM 输出 done）
 ```
 
+## V0.5 历史记忆（Memory）
+
+V0.5 解决长任务中的"上下文丢失"：V0.3 起历史只保留最近 5 条（滑动窗口），超出即丢弃，长任务超过窗口后 LLM 会忘记"已经做过什么"。
+
+- **HistoryMemory**（`agent/core/memory.py`）— 增量式历史记忆：超出窗口的旧条目按批折叠为摘要（默认 `window=5, batch=10`），每条目只摘要一次；`context_entries()` 输出「摘要 + 最近窗口」压缩上下文，摘要不占窗口名额。
+- **规则式摘要**（`summarize_entries()`）— 每条历史压缩为一行「动作 目标 → 结果」，确定性零成本；可注入异步 LLM 摘要器替换（扩展点，不影响默认行为）。
+- **摘要协议** — `serialize_history` / `build_user_prompt` 将摘要条目渲染为 `{"summary": ...}` 并恒在头部；纯列表行为与 V0.3 完全一致（回归）。
+- **Agent 接入** — 每步经 `_record_step()` 同步写入记忆并触发折叠；`plan_with_history` / `plan_step` / `reflect` 改传压缩上下文；`Agent.history` 仍保留完整原始列表（公开契约不变）。
+- **安全边界** — 摘要只含 `action / target / 成功与否`，不含输入值、URL、截图等敏感内容。
+
+```text
+Agent 每步 → _record_step() → HistoryMemory（滚动摘要 + 窗口）
+    → context_entries() = [摘要?] + [最近窗口]
+    → plan_with_history / plan_step / reflect
+```
+
 ## 快速开始
 
 ```bash
@@ -277,5 +294,5 @@ pytest
 | V0.2 | Agent Loop：规则驱动 Planner + 执行契约加固 | ✅ 完成 |
 | V0.3 | 接入 LLM：LLM Planner（LLMClient 抽象 + LLMPlanner + 安全序列化 + OpenAI Provider） | ✅ 完成 |
 | V0.4 | Reflection：错误恢复与重试（任务步骤队列 / 停滞检测 / 异常防护 / 失败重试 / LLM 重试 / 后退刷新恢复） | ✅ 完成 |
-| V0.5 | Memory：历史操作与上下文记忆 | 📋 待开始 |
+| V0.5 | Memory：历史操作与上下文记忆（增量摘要 + 滑动窗口 + 上下文压缩） | ✅ 完成 |
 | V1.0 | 完整 Agentic RPA：登录/查询/下载/上传/Excel 处理 | 🎯 规划中 |
