@@ -166,6 +166,9 @@ class Agent:
             # 5. Record history（V0.5 起同步写入记忆，供上下文压缩）
             await self._record_step(self._current_step, final_action, observation)
 
+            # 5.5 反馈执行结果给 Planner（失败时回滚乐观状态，待解决问题 #1）
+            self._notify_planner_result(final_action, observation)
+
             # 6. Check failure（重试与 Reflection 均失败 → 尝试页面恢复，仍失败则中止）
             if observation.is_error:
                 logger.warning("❌ [Step {}] 动作失败（已重试）: {}", self._current_step, observation.error)
@@ -309,6 +312,9 @@ class Agent:
             # 5. Record history（V0.5 起同步写入记忆，供上下文压缩）
             await self._record_step(self._current_step, final_action, observation)
 
+            # 5.5 反馈执行结果给 Planner（失败时回滚乐观状态，待解决问题 #1）
+            self._notify_planner_result(final_action, observation)
+
             # 6. Check failure（重试与 Reflection 均失败 → 尝试页面恢复，仍失败则中止）
             if observation.is_error:
                 logger.warning("❌ [Step {}] 动作失败（已重试）: {}", self._current_step, observation.error)
@@ -398,6 +404,23 @@ class Agent:
         except Exception as e:
             logger.warning("⚠️  动作执行异常（浏览器可能已关闭）: {}", e)
             return None
+
+    def _notify_planner_result(
+        self, action: Action, observation: Observation,
+    ) -> None:
+        """反馈动作执行结果给 Planner（待解决问题 #1）。
+
+        状态型规划器（RuleBasedPlanner）据此在动作失败时回滚乐观置位，
+        避免下一轮规划跳过失败步骤或误判任务完成；对不支持该接口的
+        Planner（基类 no-op / LLM 规划器）无副作用。
+        """
+        notify = getattr(self._planner, "on_action_result", None)
+        if notify is None:
+            return
+        try:
+            notify(action, observation)
+        except Exception as e:
+            logger.warning("⚠️  Planner.on_action_result 执行异常: {}", e)
 
     async def _execute_action_with_retry(
         self,

@@ -32,6 +32,7 @@ from agent.prompts.planner import (
     serialize_snapshot,
 )
 from agent.schema.action import Action, VALID_ACTIONS, done, goto
+from agent.schema.observation import Observation
 from agent.schema.snapshot import ElementInfo, Snapshot
 
 
@@ -161,6 +162,14 @@ class Planner:
         """
         return None
 
+    def on_action_result(self, action: Action, observation: Observation) -> None:
+        """接收动作执行结果（待解决问题 #1）。
+
+        Agent 每次动作执行完成后调用（成功或失败均调用）。默认 no-op；
+        状态型规划器（RuleBasedPlanner）覆盖本方法，用于在动作执行失败时
+        回滚规划阶段乐观置位的状态。
+        """
+
 
 # ═══════════════════════════════════════════════════════════════
 # RuleBasedPlanner（V0.2）
@@ -198,6 +207,9 @@ class RuleBasedPlanner(Planner):
         self._submitted = False     # 是否已提交搜索
         self._clicked: set[str] = set()   # 已点击的目标文本
         self._wait_count = 0        # 连续等待次数（防死循环）
+        # 最近一次乐观置位对应的意图（待解决问题 #1，失败时回滚依据）
+        # 取值：("input",) / ("submit",) / ("target", 目标文本)
+        self._last_intent: Optional[tuple] = None
 
     # ── 自定义规则 ──────────────────────────────────────────────
 
@@ -250,6 +262,29 @@ class RuleBasedPlanner(Planner):
         self._submitted = False
         self._clicked.clear()
         self._wait_count = 0
+        self._last_intent = None
+
+    def on_action_result(self, action: Action, observation: Observation) -> None:
+        """按动作执行结果回滚乐观状态（待解决问题 #1）。
+
+        内置规则的状态（_searched / _submitted / _clicked）在规划时乐观置位；
+        Agent 执行完成后调用本方法（成功或失败均调用）：
+        - 成功：状态保持，仅清除意图记录；
+        - 失败：按最近一次规划意图精确回滚 —— 输入失败重新输入、
+          提交失败重新提交、目标点击失败重新点击（且不得误判任务完成）。
+        自定义规则 / Reflection 替代动作不设意图，失败时不回滚内置状态。
+        """
+        intent = self._last_intent
+        self._last_intent = None
+        if observation is None or not observation.is_error:
+            return
+        if action.action == "input":
+            self._searched = False
+        elif action.action == "click" and intent is not None:
+            if intent[0] == "submit":
+                self._submitted = False
+            elif intent[0] == "target":
+                self._clicked.discard(intent[1])
 
     # ── 内置规则 ────────────────────────────────────────────────
 
@@ -265,6 +300,7 @@ class RuleBasedPlanner(Planner):
             box = self._find_search_box(snapshot)
             if box is not None:
                 self._searched = True
+                self._last_intent = ("input",)
                 return Action(action="input", target_id=box.element_id,
                               value=spec.search_keywords[0])
         # 4. 提交搜索
@@ -272,6 +308,7 @@ class RuleBasedPlanner(Planner):
             btn = self._find_submit_button(snapshot)
             if btn is not None:
                 self._submitted = True
+                self._last_intent = ("submit",)
                 return Action(action="click", target_id=btn.element_id)
         # 5. 等待条件（页面加载 / 指定文本出现）
         if not self._wait_conditions_satisfied(snapshot, spec):
@@ -284,6 +321,7 @@ class RuleBasedPlanner(Planner):
                 el = self._find_by_text(snapshot, text)
                 if el is not None:
                     self._clicked.add(text)
+                    self._last_intent = ("target", text)
                     return Action(action="click", target_id=el.element_id)
         # 7. 结果链接（搜索后点击第一条）
         if self._submitted:

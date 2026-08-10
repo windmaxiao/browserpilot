@@ -593,3 +593,83 @@ async def test_recovery_unavailable_aborts():
     tool.back.assert_awaited_once()
     tool.refresh.assert_awaited_once()
     assert len(agent.history) == 1
+
+
+# ── V0.6：动作结果反馈 Planner（on_action_result，待解决问题 #1）─────
+
+class _NotifyingPlannerStub(_PlannerStub):
+    """记录 on_action_result 调用与参数（含最终执行的动作）。"""
+
+    def __init__(self, actions=None):
+        super().__init__(actions)
+        self.results: list[tuple] = []
+
+    def on_action_result(self, action, observation):
+        self.results.append((action, observation))
+
+
+@pytest.mark.asyncio
+async def test_agent_notifies_planner_result_on_success_and_failure():
+    """Agent 每次动作执行后都调用 planner.on_action_result（成功与失败均通知）"""
+    # 失败场景：click 始终失败 → Agent 中止 → 通知一次 (click, fail)
+    agent, planner, tool = make_mocks([
+        Action(action="click", params={"selector": "#btn"}),
+        done(),  # 不应被执行
+    ])
+    planner.__class__ = _NotifyingPlannerStub  # 替换为带通知实现的桩
+    planner.results = []                        # 切换类后补初始化
+    agent._max_recoveries = 0
+    tool.click = AsyncMock(return_value=Observation.fail("元素不存在"))
+
+    obs = await agent.run("点击按钮")
+
+    assert obs.is_error is True
+    assert len(planner.results) == 1
+    failed_action, failed_obs = planner.results[0]
+    assert failed_action.action == "click"
+    assert failed_obs.is_error is True      # 失败结果原样反馈
+
+    # 成功场景：click 成功 → done → 通知一次 (click, ok)
+    agent2, planner2, tool2 = make_mocks([
+        Action(action="click", params={"selector": "#btn"}),
+        done(),
+    ])
+    planner2.__class__ = _NotifyingPlannerStub
+    planner2.results = []                       # 切换类后补初始化
+    tool2.click = AsyncMock(return_value=Observation.ok(page_changed=True))
+
+    obs2 = await agent2.run("点击按钮")
+
+    assert obs2.success is True
+    assert len(planner2.results) == 1
+    ok_action, ok_obs = planner2.results[0]
+    assert ok_action.action == "click"
+    assert ok_obs.is_error is False
+
+
+@pytest.mark.asyncio
+async def test_agent_notifies_planner_on_final_reflect_action():
+    """Reflection 替代动作执行后，通知的是最终执行的动作"""
+    agent, planner, tool = make_mocks([
+        Action(action="click", params={"selector": "#btn"}),
+        done(),  # 不应被执行
+    ])
+    planner.__class__ = _NotifyingPlannerStub
+    planner.results = []                        # 切换类后补初始化
+    # 机械重试失败 → Reflection 返回 refresh 替代动作 → 成功
+    tool.click = AsyncMock(return_value=Observation.fail("元素不存在"))
+    tool.refresh = AsyncMock(return_value=Observation.ok(page_changed=True))
+    agent._max_recoveries = 0  # 避免干扰 Reflection 路径
+
+    async def fake_reflect(snapshot, goal, history, action, error):
+        return Action(action="refresh")
+
+    planner.reflect = fake_reflect
+
+    obs = await agent.run("点击按钮")
+
+    assert obs.success is True
+    assert len(planner.results) == 1
+    final_action, final_obs = planner.results[0]
+    assert final_action.action == "refresh"  # 最终执行的是替代动作
+    assert final_obs.success is True

@@ -12,8 +12,9 @@ import sys
 sys.path.insert(0, ".")
 
 import pytest
-from agent.core.planner import RuleBasedPlanner, parse_goal
+from agent.core.planner import Planner, RuleBasedPlanner, parse_goal
 from agent.schema.action import Action
+from agent.schema.observation import Observation
 from agent.schema.snapshot import ElementInfo, Snapshot
 
 
@@ -455,3 +456,88 @@ class TestWaitConditions:
         action = await planner.plan(snap, "点击 北京时间 - 百度百科")
         assert action.action == "click"
         assert action.target_id == "e3"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 失败回滚：on_action_result（待解决问题 #1）
+# ═══════════════════════════════════════════════════════════════
+
+class TestFailureRollback:
+    """动作执行失败时回滚乐观状态，避免跳过失败步骤或误判任务完成"""
+
+    @pytest.mark.asyncio
+    async def test_input_failure_retries_input(self):
+        """输入失败回滚 _searched → 下一轮仍规划 input"""
+        planner = RuleBasedPlanner()
+        snap = search_page_snapshot()
+        action = await planner.plan(snap, "查找 北京时间")   # 乐观置位 _searched
+        assert action.action == "input"
+        planner.on_action_result(action, Observation.fail(error="输入失败"))
+        assert planner._searched is False
+        action2 = await planner.plan(snap, "查找 北京时间")
+        assert action2.action == "input"
+
+    @pytest.mark.asyncio
+    async def test_submit_failure_retries_submit(self):
+        """提交失败回滚 _submitted → 下一轮仍规划提交 click"""
+        planner = RuleBasedPlanner()
+        snap = search_page_snapshot()
+        await planner.plan(snap, "查找 北京时间")   # input
+        action = await planner.plan(snap, "查找 北京时间")  # submit（乐观置位）
+        assert action.action == "click"
+        planner.on_action_result(action, Observation.fail(error="提交失败"))
+        assert planner._submitted is False
+        action2 = await planner.plan(snap, "查找 北京时间")
+        assert action2.action == "click"
+        assert action2.target_id == "e2"
+
+    @pytest.mark.asyncio
+    async def test_target_click_failure_keeps_submitted(self):
+        """目标点击失败仅回滚该目标，不影响已提交状态"""
+        planner = RuleBasedPlanner()
+        snap = search_page_snapshot()
+        goal = "查找 北京时间 点击 北京时间 - 百度百科"
+        await planner.plan(snap, goal)   # input
+        await planner.plan(snap, goal)   # submit（_submitted=True）
+        baike = baike_link_snapshot()
+        action = await planner.plan(baike, goal)  # 点击目标
+        assert action.action == "click"
+        planner.on_action_result(action, Observation.fail(error="点击失败"))
+        assert planner._submitted is True      # 提交状态不受影响
+        assert planner._clicked == set()       # 目标已回滚
+        action2 = await planner.plan(baike, goal)
+        assert action2.action == "click"       # 重新点击目标，而非 done
+        assert action2.target_id == "e3"
+
+    @pytest.mark.asyncio
+    async def test_success_keeps_state(self):
+        """执行成功状态保持（无回滚）"""
+        planner = RuleBasedPlanner()
+        snap = search_page_snapshot()
+        action = await planner.plan(snap, "查找 北京时间")   # input
+        planner.on_action_result(action, Observation.ok())
+        assert planner._searched is True
+        action2 = await planner.plan(snap, "查找 北京时间")
+        assert action2.action == "click"       # 跳过 input 直接提交
+
+    @pytest.mark.asyncio
+    async def test_target_click_failure_not_premature_done(self):
+        """目标点击失败后不得提前 done（_should_finish 依赖 _clicked）"""
+        planner = RuleBasedPlanner()
+        snap = search_page_snapshot()
+        goal = "查找 北京时间 点击 北京时间 - 百度百科"
+        await planner.plan(snap, goal)
+        await planner.plan(snap, goal)
+        baike = baike_link_snapshot()
+        action = await planner.plan(baike, goal)
+        assert action.action == "click"
+        planner.on_action_result(action, Observation.fail(error="点击失败"))
+        action2 = await planner.plan(baike, goal)
+        assert action2.action == "click"       # 而非 done
+
+    def test_base_planner_on_action_result_is_noop(self):
+        """Planner 基类 on_action_result 默认为 no-op，不抛异常"""
+        planner = Planner()
+        planner.on_action_result(
+            Action(action="click", target_id="e1"), Observation.fail(error="x"),
+        )
