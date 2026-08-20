@@ -230,3 +230,31 @@ async def test_executor_input_third_level_by_target_id(page):
         "iframe#frame-level2"
     ).locator("#l2-input")
     assert await inp.input_value() == "rpa-ok"
+
+
+@pytest.mark.asyncio
+async def test_llm_parse_action_target_id_keeps_frame_path(page):
+    """回归 #1：LLM 输出经 parse_action_dict → Executor → BrowserTool，
+    iframe 元素 frame_path 不被本地注入的 selector 降级为主页面"""
+    from agent.prompts.planner import parse_action_dict
+
+    snap = await SnapshotGenerator(page).generate()
+    target = _element_by(snap, "inputs", ("#frame-level1", "#frame-level2"))
+    assert target is not None, "Snapshot 未找到第三层输入框"
+
+    # 模拟 LLM 输出：只给 target_id（selector 由 parse_action_dict 本地注入）
+    action = parse_action_dict(
+        {"action": "input", "target_id": target.element_id, "value": "rpa-ok"},
+        snap,
+    )
+    # 确认注入点存在：模型未提供 selector，但 parse_action_dict 已写入本地可信 selector
+    assert action.params.get("selector") == target.selector
+
+    tool = BrowserTool(page)
+    executor = Executor(tool)
+    obs = await executor.execute(action, snapshot=snap)
+    assert obs.success
+    inp = page.frame_locator("iframe#frame-level1").frame_locator(
+        "iframe#frame-level2"
+    ).locator("#l2-input")
+    assert await inp.input_value() == "rpa-ok"

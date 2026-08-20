@@ -285,6 +285,40 @@ class TestTargetIdResolution:
         assert "e999" in obs.error
 
     @pytest.mark.asyncio
+    async def test_execute_frame_path_kept_with_injected_selector(self):
+        """回归 #1：parse_action_dict 注入的 params.selector 不得把 iframe 元素 frame_path 降级为主页面"""
+        tool = MagicMock()
+        tool.click = AsyncMock(return_value=Observation.ok(page_changed=True))
+        tool.current_url = "https://example.com"
+        tool.current_title = AsyncMock(return_value="Example")
+
+        exec = Executor(tool)
+        snap = MagicMock()
+        # iframe 内元素：frame_path 非空
+        el = MagicMock(
+            element_id="e9",
+            selector="#l2-btn",
+            frame_path=("#frame-level1", "#frame-level2"),
+        )
+        snap.get_interactive_elements.return_value = [el]
+
+        # 模拟 LLM 链路（parse_action_dict）：target_id 命中 + 注入本地 selector
+        action = Action(
+            action="click",
+            target_id="e9",
+            params={"selector": "#l2-btn"},
+        )
+        obs = await exec.execute(action, snapshot=snap)
+
+        assert obs.success is True
+        tool.click.assert_awaited_once_with(
+            "#l2-btn",
+            timeout=5000,
+            force=False,
+            frame_path=("#frame-level1", "#frame-level2"),
+        )
+
+    @pytest.mark.asyncio
     async def test_execute_without_snapshot_uses_target_fallback(self):
         """不传 snapshot 时仍能通过 target 正常执行"""
         tool = MagicMock()

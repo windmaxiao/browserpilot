@@ -265,15 +265,17 @@ class Executor:
         """
         解析目标元素的 frame_path（V1.0 子计划 A）。
 
-        优先级与 _resolve_target 一致：
-        1. params["selector"] 显式指定 → 主页面（空元组）
-        2. target_id 命中 → 从 Snapshot 的 frame_path 映射查询
+        优先级：
+        1. target_id 命中当前 Snapshot → 从 frame_path 映射查询
+           （parse_action_dict 会为命中元素注入本地 selector，二者同源；
+             若先判 params["selector"] 会把 iframe 元素降级为主页面——待解决问题 #1）
+        2. params["selector"] 显式指定 → 主页面（空元组）
         3. 其他 → 主页面（空元组）
         """
-        if action.params.get("selector"):
-            return ()
         if action.target_id and action.target_id in self._frame_map:
             return self._frame_map[action.target_id]
+        if action.params.get("selector"):
+            return ()
         return ()
 
     def _resolve_target(self, action: Action) -> str | None:
