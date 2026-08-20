@@ -9,7 +9,7 @@
   <button id="xtra-btn">额外按钮</button>
   <input id="xtra-input" type="text" placeholder="额外输入">
 
-  <!-- 两个重复 id 的 iframe：消歧为 #dup-f 与 iframe >> nth=1 -->
+  <!-- 两个重复 id 的 iframe：重复段全部用位置索引消歧（nth=0 / nth=1），不得保留非唯一 #dup-f -->
   <iframe id="dup-f" src="iframe_dup.html"></iframe>
   <iframe id="dup-f" src="iframe_dup.html"></iframe>
 </body>

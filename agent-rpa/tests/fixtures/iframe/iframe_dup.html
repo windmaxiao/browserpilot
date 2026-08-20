@@ -7,5 +7,11 @@
 <body>
   <h3>重复 iframe 内容</h3>
   <button class="dup-btn">重复按钮</button>
+  <span id="dup-status">未点击</span>
+  <script>
+    document.querySelector('.dup-btn').addEventListener('click', function () {
+      document.getElementById('dup-status').textContent = '已被点击';
+    });
+  </script>
 </body>
 </html>

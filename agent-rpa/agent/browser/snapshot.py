@@ -136,7 +136,8 @@ class SnapshotGenerator:
 
         优先级：id → name → 父内位置（`iframe >> nth=j`，按 DOM 顺序消歧）。
         与 ElementInfo.selector 契约一致：每段都是父 document 内可定位该 iframe
-        元素的选择器，重复 id/无 id 时用位置索引保证唯一。
+        元素的选择器。重复的 id/name 段（含第一个）一律改用位置索引——
+        非唯一段在 FrameLocator 严格模式下无法确定目标（待解决问题 #2）。
         """
         base = []
         for el in iframe_els:
@@ -149,11 +150,14 @@ class SnapshotGenerator:
                 base.append(f'iframe[name="{self._css_escape_string(name)}"]')
                 continue
             base.append(None)  # 交由位置消歧
-        seen: dict[str, int] = {}
+        # 统计语义段出现次数：任何重复的 id/name 段都改用位置索引
+        counts: dict[str, int] = {}
+        for seg in base:
+            if seg is not None:
+                counts[seg] = counts.get(seg, 0) + 1
         result = []
         for j, seg in enumerate(base):
-            if seg is not None and seg not in seen:
-                seen[seg] = 0
+            if seg is not None and counts[seg] == 1:
                 result.append(seg)
             else:
                 result.append(f"iframe >> nth={j}")

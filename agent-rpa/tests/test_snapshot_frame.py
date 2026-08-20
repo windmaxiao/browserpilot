@@ -111,7 +111,7 @@ async def test_no_id_iframe_positional_disambiguation(page):
 
 @pytest.mark.asyncio
 async def test_duplicate_id_iframe_disambiguation(page):
-    """重复 id 的 iframe：第一个用 id，第二个用位置索引消歧"""
+    """重复 id 的 iframe：重复段（含第一个）全部用位置索引消歧，不保留非唯一 #dup-f"""
     snap = await SnapshotGenerator(page).generate()
     dup_btns = [b for b in snap.buttons if b.text == "重复按钮"]
 
@@ -120,11 +120,10 @@ async def test_duplicate_id_iframe_disambiguation(page):
 
     # 进入 extra 的路径：无 id iframe → 位置 nth=1
     base = ("iframe >> nth=1",)
-    # extra 内两个 iframe（重复 id dup-f）：第一个 id，第二个位置 nth=1
-    frames = sorted(dup_btns, key=lambda b: b.text)
+    # extra 内两个 iframe（重复 id dup-f）：均改用位置索引 nth=0 / nth=1
     paths = {b.frame_path for b in dup_btns}
     assert paths == {
-        base + ("#dup-f",),
+        base + ("iframe >> nth=0",),
         base + ("iframe >> nth=1",),
     }
 
@@ -258,3 +257,26 @@ async def test_llm_parse_action_target_id_keeps_frame_path(page):
         "iframe#frame-level2"
     ).locator("#l2-input")
     assert await inp.input_value() == "rpa-ok"
+
+
+@pytest.mark.asyncio
+async def test_click_each_duplicate_id_iframe(page):
+    """回归 #2：重复 id iframe 的每个 frame_path 都唯一（含第一个），
+    FrameLocator 严格模式下可逐个穿透点击"""
+    snap = await SnapshotGenerator(page).generate()
+    dup_btns = [b for b in snap.buttons if b.text == "重复按钮"]
+    assert len(dup_btns) == 2
+
+    tool = BrowserTool(page)
+    executor = Executor(tool)
+    for b in dup_btns:
+        obs = await executor.execute(
+            act_click(target="x", target_id=b.element_id), snapshot=snap
+        )
+        assert obs.success, f"点击重复 iframe 按钮失败: {obs.error}"
+
+    # 两个重复 iframe 各自独立被点击（第一个 nth=0 与第二个 nth=1 均生效）
+    await page.wait_for_timeout(100)
+    for seg in ("iframe >> nth=0", "iframe >> nth=1"):
+        status = page.frame_locator("iframe >> nth=1").frame_locator(seg).locator("#dup-status")
+        assert await status.inner_text() == "已被点击"
