@@ -54,6 +54,20 @@ def _by(snap, element_type: str, element_id: str):
 
 
 @pytest.mark.asyncio
+async def test_clickable_empty_text_fallback_to_attribute(page):
+    """空文本但带交互属性的可点击入口：text 回退属性值、selector 用属性定位（#8）"""
+    snap = await SnapshotGenerator(page).generate()
+    buttons = [it for it in snap.buttons if it.frame_path == ()]
+
+    # 空文本 span[data-source] 应保留在 buttons（不再被 require_text 过滤）
+    target = next((it for it in buttons if "data-source" in it.attributes), None)
+    assert target is not None, "空文本可点击入口应被识别"
+    assert target.text == "data-source=10000381"  # text 回退属性值，供 LLM 引用
+    assert target.selector == 'span[data-source="10000381"]'  # selector 用属性定位
+    assert target.attributes.get("data-source") == "10000381"
+
+
+@pytest.mark.asyncio
 async def test_three_level_elements_visible(page):
     """三层 iframe 内元素全部被提取（层级正确）"""
     snap = await SnapshotGenerator(page).generate()

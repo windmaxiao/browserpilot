@@ -34,9 +34,15 @@ class SnapshotGenerator:
     ATTR_KEYS = (
         "data-testid", "id", "role", "type", "href", "src", "alt",
         "aria-label", "value", "placeholder",
+        # 可点击文本元素交互属性（V1.0 增强）：ERP 类系统用 div/span/p 当入口，
+        # 常以这些属性承载业务标识（如 SAP 的 gcode/data-source），空文本时回退为展示文本
+        "gcode", "data-source", "data-id", "data-code", "data-action",
     )
     # 写入 ElementInfo.attributes 的属性（与历史字段语义保持一致）
-    ATTRIBUTE_FIELDS = ("data-testid", "role", "type", "href", "src", "alt")
+    ATTRIBUTE_FIELDS = (
+        "data-testid", "role", "type", "href", "src", "alt",
+        "gcode", "data-source", "data-id", "data-code", "data-action",
+    )
 
     # 各类元素提取选择器（批量 JS 提取与旧逐元素路径共用，单一来源）
     SELECTOR_BUTTONS = (
@@ -88,7 +94,12 @@ class SnapshotGenerator:
         "     src: el.getAttribute('src') || '',"
         "     alt: el.getAttribute('alt') || '',"
         "     value: el.getAttribute('value') || '',"
-        "     placeholder: el.getAttribute('placeholder') || ''"
+        "     placeholder: el.getAttribute('placeholder') || '',"
+        "     gcode: el.getAttribute('gcode') || '',"
+        "     'data-source': el.getAttribute('data-source') || '',"
+        "     'data-id': el.getAttribute('data-id') || '',"
+        "     'data-code': el.getAttribute('data-code') || '',"
+        "     'data-action': el.getAttribute('data-action') || ''"
         "    }"
         "   };"
         "  } catch (err) { return null; }"
@@ -109,7 +120,13 @@ class SnapshotGenerator:
         "   if (tag === 'div' || tag === 'td') return false;"
         "   return getComputedStyle(el).cursor === 'pointer';"
         "  } catch (e) { return true; }"
-        " }).slice(0, " + str(_CLICKABLE_MAX) + ").map((el) => extract(el)).filter(Boolean);"
+        " }).slice(0, " + str(_CLICKABLE_MAX) + ").map((el) => extract(el)).filter(Boolean)"
+        "  .map((d) => {"
+        "   if (!d || d.text) return d;"
+        "   const attr = CLICKABLE_ATTRS.find((k) => d.attrs[k]);"
+        "   if (attr) d.text = attr + '=' + d.attrs[attr];"
+        "   return d;"
+        "  });"
         " return {"
         "  buttons: one(" + json.dumps(SELECTOR_BUTTONS) + "),"
         "  inputs: one(" + json.dumps(SELECTOR_INPUTS) + "),"
@@ -458,6 +475,12 @@ class SnapshotGenerator:
             return f'[role="{self._css_escape_string(role)}"]'
         if aria_label:
             return f'[aria-label="{self._css_escape_string(aria_label)}"]'
+        # 交互属性优先（gcode/data-source 等）：空文本可点击元素以属性定位，避免 :has-text 失配；
+        # 带标签前缀提高特异性（如 span[data-source="10000381"]，与确定性导航选择器一致）
+        for attr in ("gcode", "data-source", "data-id", "data-code", "data-action"):
+            value = attributes.get(attr, "")
+            if value:
+                return f'{tag}[{attr}="{self._css_escape_string(value)}"]'
         if text and tag:
             return f'{tag}:has-text("{self._css_escape_string(text[:50])}")'
         return tag
@@ -574,6 +597,13 @@ class SnapshotGenerator:
         aria = await _get("aria-label")
         if aria:
             return f'[aria-label="{self._css_escape_string(aria)}"]'
+
+        # 交互属性优先（gcode/data-source 等）：空文本可点击元素以属性定位，避免 :has-text 失配；
+        # 带标签前缀提高特异性（如 span[data-source="10000381"]，与确定性导航选择器一致）
+        for attr in ("gcode", "data-source", "data-id", "data-code", "data-action"):
+            value = await _get(attr)
+            if value:
+                return f'{tag}[{attr}="{self._css_escape_string(value)}"]'
 
         if text and tag:
             safe_text = self._css_escape_string(text[:50])

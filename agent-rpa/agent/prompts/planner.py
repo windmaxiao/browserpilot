@@ -24,7 +24,12 @@ from agent.schema.snapshot import ElementInfo, Snapshot
 # ── 常量与默认限制 ──────────────────────────────────────────────────
 
 # 可安全暴露给模型的属性白名单（selector / href / 敏感属性一律不输出）
-_SAFE_ATTRIBUTE_KEYS = ("data-testid", "name", "type", "role")
+_SAFE_ATTRIBUTE_KEYS = (
+    "data-testid", "name", "type", "role",
+    # 可点击文本元素交互属性（V1.0 增强）：ERP 系统用 gcode/data-source 等承载业务标识，
+    # 空文本入口据此供 LLM 引用
+    "gcode", "data-source", "data-id", "data-code", "data-action",
+)
 
 # URL 查询参数中疑似敏感的关键字（值会被掩码为 ***）
 _SENSITIVE_QUERY_PARAMS = frozenset({
