@@ -53,7 +53,14 @@ class LLMClient(Protocol):
 
 
 class LLMError(Exception):
-    """LLM 调用相关错误基类。"""
+    """LLM 调用相关错误基类。
+
+    ``status_code``：HTTP 响应码（超时/连接类错误通常无码，为 None）。
+    """
+
+    def __init__(self, message: str = "", *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class LLMRetryableError(LLMError):

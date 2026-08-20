@@ -12,7 +12,7 @@ LLM Planner 解析测试（V0.3 阶段 C）
 import pytest
 
 from agent.core.planner import LLMPlanner, Planner
-from agent.llm import LLMTimeoutError, MockLLMClient
+from agent.llm import LLMRateLimitError, LLMTimeoutError, MockLLMClient
 from agent.prompts.planner import (
     SYSTEM_PROMPT,
     ActionParseError,
@@ -192,13 +192,13 @@ class TestLLMPlanner:
         assert action.value == "5000"
 
     async def test_prompt_and_response_are_logged(self):
-        """程序与大模型的对话以 DEBUG 级别记录（请求与响应可观测）"""
+        """程序与大模型的对话以 INFO 级别记录（请求与响应可观测）"""
         import io
 
         from loguru import logger
 
         sink = io.StringIO()
-        logger_id = logger.add(sink, level="DEBUG")
+        logger_id = logger.add(sink, level="INFO")
         try:
             client = MockLLMClient([{"action": "done"}])
             planner = LLMPlanner(client, model="mock", timeout=1000)
@@ -257,6 +257,34 @@ class TestLLMPlanner:
         assert action.action == "click"
         assert action.params["selector"] == "#btn-login"
         assert client.call_count == 3
+
+    async def test_llm_error_logs_http_status_code(self):
+        """LLM 调用错误在日志中展示 HTTP 状态码（可重试/不可重试均覆盖）"""
+        import io
+
+        from loguru import logger
+
+        from agent.llm.base import LLMError
+
+        sink = io.StringIO()
+        logger_id = logger.add(sink, level="WARNING")
+        try:
+            # 可重试：限流 429 → 日志含 HTTP 429
+            client = MockLLMClient([
+                LLMRateLimitError("限流", status_code=429),
+                {"action": "done"},
+            ])
+            planner = LLMPlanner(client, model="mock", timeout=1000, llm_retry_delay=0)
+            await planner.plan(_snapshot(), "点击")
+            # 不可重试：401 → 日志含 HTTP 401
+            client2 = MockLLMClient([LLMError("认证失败", status_code=401)])
+            planner2 = LLMPlanner(client2, model="mock", timeout=1000)
+            await planner2.plan(_snapshot(), "点击")
+        finally:
+            logger.remove(logger_id)
+        text = sink.getvalue()
+        assert "HTTP 429" in text
+        assert "HTTP 401" in text
 
     async def test_reflect_returns_alternative_action(self):
         """Reflection 分析失败原因并给出替代动作（安全转换）"""

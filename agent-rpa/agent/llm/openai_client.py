@@ -242,20 +242,25 @@ class OpenAILLMClient:
 
     @staticmethod
     def _map_error(e: Exception) -> LLMError:
-        """将 openai SDK 异常映射为统一错误分类（可重试 / 不可重试）。"""
+        """将 openai SDK 异常映射为统一错误分类（可重试 / 不可重试）。
+
+        同时提取 HTTP 状态码（``status_code``，超时/连接类错误通常为 None），
+        供上层日志展示响应码，便于区分 401/404/429/5xx 等。
+        """
         try:
             import openai
         except ImportError:
             return LLMNetworkError(f"LLM 调用失败: {e}")
+        status = getattr(e, "status_code", None)
         if isinstance(e, openai.APITimeoutError):
-            return LLMTimeoutError("LLM 请求超时")
+            return LLMTimeoutError("LLM 请求超时", status_code=status)
         if isinstance(e, openai.APIConnectionError):
-            return LLMNetworkError("LLM 网络连接失败")
+            return LLMNetworkError("LLM 网络连接失败", status_code=status)
         if isinstance(e, openai.RateLimitError):
-            return LLMRateLimitError("LLM 请求被限流")
+            return LLMRateLimitError("LLM 请求被限流", status_code=status)
         if isinstance(e, openai.InternalServerError):
-            return LLMNetworkError("LLM 服务端错误")
+            return LLMNetworkError("LLM 服务端错误", status_code=status)
         if isinstance(e, openai.APIError):
             # 认证 / 权限 / 无效请求等：不可重试
-            return LLMError(f"LLM API 错误: {e}")
-        return LLMNetworkError(f"LLM 调用失败: {e}")
+            return LLMError(f"LLM API 错误: {e}", status_code=status)
+        return LLMNetworkError(f"LLM 调用失败: {e}", status_code=status)

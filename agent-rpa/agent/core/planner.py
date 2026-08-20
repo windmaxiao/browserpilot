@@ -175,6 +175,15 @@ class Planner:
 # RuleBasedPlanner（V0.2）
 # ═══════════════════════════════════════════════════════════════
 
+def _error_detail(e: BaseException) -> str:
+    """错误信息 + HTTP 响应码（供 LLM 调用日志展示）。
+
+    有状态码 → ``错误 | HTTP 429``；无状态码（超时/连接类）→ ``错误（无 HTTP 响应码）``。
+    """
+    code = getattr(e, "status_code", None)
+    return f"{e} | HTTP {code}" if code else f"{e}（无 HTTP 响应码）"
+
+
 class RuleBasedPlanner(Planner):
     """
     基于规则的规划器（V0.2 实现）。
@@ -457,7 +466,7 @@ class LLMPlanner(Planner):
 
     1. Snapshot → 模型视图（:func:`serialize_snapshot`，脱敏 + 截断）。
     2. 构建系统 / 用户提示词，用户提示词含最近历史滑动窗口。
-    3. 调用 ``complete_json()`` 请求一个 Action JSON（可重试错误指数退避自动重试，V0.4）。
+    3. 调用 ``complete_json()`` 请求一个 Action JSON（可重试错误指数退避自动重试并封顶，V0.4）。
     4. :func:`parse_action_dict` 安全转换为已验证的 Action
        （target_id 本地映射 selector，忽略模型伪造的 selector）。
     5. 内容层失败最多发起 ``max_repair_attempts`` 次修复请求；仍失败返回 None。
@@ -473,8 +482,9 @@ class LLMPlanner(Planner):
         max_repair_attempts: int = 1,
         timeout: int = 30_000,
         constraints: Optional[list[str]] = None,
-        llm_retries: int = 3,
-        llm_retry_delay: float = 0.5,
+        llm_retries: int = 5,
+        llm_retry_delay: float = 2.0,
+        llm_retry_max_delay: float = 16.0,
     ):
         self._client = client
         self._model = model
@@ -483,6 +493,7 @@ class LLMPlanner(Planner):
         self._constraints = list(constraints) if constraints else None
         self._llm_retries = llm_retries
         self._llm_retry_delay = llm_retry_delay
+        self._llm_retry_max_delay = llm_retry_max_delay
 
     @property
     def model(self) -> str:
@@ -502,7 +513,7 @@ class LLMPlanner(Planner):
         for attempt in range(self._llm_retries):
             try:
                 # 只记录摘要（模型/序号/长度），不输出完整提示词（含页面文本与目标）
-                logger.debug(
+                logger.info(
                     "🧠 LLM 请求（模型: {} | 第 {} 次 | system {} 字符 | user {} 字符）",
                     self._model, attempt + 1, len(system_prompt), len(user_prompt),
                 )
@@ -512,22 +523,25 @@ class LLMPlanner(Planner):
                     schema=schema,
                     timeout=self._timeout,
                 )
-                logger.debug("🤖 LLM 响应: {}", json.dumps(raw, ensure_ascii=False))
+                logger.info("🤖 LLM 响应: {}", json.dumps(raw, ensure_ascii=False))
                 return raw
             except LLMRetryableError as e:
                 if attempt >= self._llm_retries - 1:
                     logger.warning(
-                        "LLM 调用重试 {} 次仍失败（可重试错误）: {}", self._llm_retries, e,
+                        "LLM 调用重试 {} 次仍失败（可重试错误）: {}", self._llm_retries, _error_detail(e),
                     )
                     return None
-                delay = self._llm_retry_delay * (2 ** attempt)
+                delay = min(
+                    self._llm_retry_delay * (2 ** attempt),
+                    self._llm_retry_max_delay,
+                )
                 logger.warning(
                     "🔁 LLM 可重试错误（第 {}/{} 次）: {} → {}s 后重试",
-                    attempt + 1, self._llm_retries, e, delay,
+                    attempt + 1, self._llm_retries, _error_detail(e), delay,
                 )
                 await asyncio.sleep(delay)
             except LLMError as e:
-                logger.warning("LLM 调用失败（不可重试）: {}", e)
+                logger.warning("LLM 调用失败（不可重试）: {}", _error_detail(e))
                 return None
         return None
 

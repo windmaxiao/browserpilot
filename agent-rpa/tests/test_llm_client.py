@@ -112,6 +112,11 @@ class TestErrorClassification:
                     LLMRateLimitError, LLMInvalidResponseError):
             assert issubclass(exc, LLMError)
 
+    def test_status_code_propagates_to_error(self):
+        """HTTP 状态码随错误分类传递（供日志展示 401/404/429/5xx 等）"""
+        assert LLMRateLimitError("限流", status_code=429).status_code == 429
+        assert LLMTimeoutError("超时").status_code is None
+
 
 class TestOpenAILLMClient:
     def test_missing_api_key_gives_clear_error(self, monkeypatch):
