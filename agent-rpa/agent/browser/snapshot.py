@@ -40,6 +40,8 @@ class SnapshotGenerator:
     def __init__(self, page: Page):
         self._page = page
         self._element_counter = 0
+        # V1.0 #5：子 frame 加载等待超时（毫秒），延迟加载帧超时即跳过
+        self._frame_load_timeout = 2000
         logger.debug("SnapshotGenerator 创建")
 
     def set_page(self, page: Page) -> None:
@@ -128,7 +130,17 @@ class SnapshotGenerator:
             except Exception:
                 child = None
             if child is None:
-                continue  # iframe 尚未加载
+                continue  # iframe 尚未挂载
+            # V1.0 #5：对子 frame 做有限超时加载等待，延迟加载的空帧跳过，
+            # 不使全局 Snapshot 失败（仅记录告警）
+            try:
+                await child.wait_for_load_state("load", timeout=self._frame_load_timeout)
+            except Exception as e:
+                logger.warning(
+                    "iframe 加载等待超时/失败，跳过该帧 | path={} | err={}",
+                    frame_path + (seg,), e,
+                )
+                continue
             await self._walk_scopes(child, frame_path + (seg,), scopes)
 
     async def _frame_segments(self, iframe_els: list) -> list[str]:

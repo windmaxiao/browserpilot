@@ -407,23 +407,28 @@ class BrowserTool:
         """轻量 DOM 指纹，用于检测页面内容变化（SPA 等无导航场景）。
 
         返回 {"elements": 元素总数, "text_len": body 可见文本长度}，
-        任一项发生变化即视为页面内容发生变化。
+        任一项发生变化即视为页面内容发生变化。跨所有 frame（主页面 + 嵌套
+        iframe）累加，使纯 iframe 内容变化也能被判定为 page_changed（#5）。
         注意：动态内容（时钟、轮播等）可能造成轻微误报，属已知取舍。
         """
-        try:
-            data = await self._page.evaluate(
-                """() => {
-                    const body = document.body;
-                    return {
-                        elements: document.getElementsByTagName('*').length,
-                        text_len: body ? body.innerText.length : 0,
-                    };
-                }"""
-            )
-            return dict(data)
-        except Exception as e:
-            logger.debug("DOM 指纹获取失败: {}", e)
-            return {}
+        elements = 0
+        text_len = 0
+        for frame in self._page.frames:
+            try:
+                data = await frame.evaluate(
+                    """() => {
+                        const body = document.body;
+                        return {
+                            elements: document.getElementsByTagName('*').length,
+                            text_len: body ? body.innerText.length : 0,
+                        };
+                    }"""
+                )
+                elements += data.get("elements", 0)
+                text_len += data.get("text_len", 0)
+            except Exception:
+                continue  # 单帧获取失败不中断整体指纹
+        return {"elements": elements, "text_len": text_len}
 
     async def _smart_wait(self):
         """智能等待页面稳定

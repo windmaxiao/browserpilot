@@ -28,6 +28,8 @@ def make_page_mock():
     page.title = AsyncMock(return_value="页面标题")
     page.wait_for_load_state = AsyncMock()
     page.url = "https://example.com"
+    # _page_fingerprint 跨 frame 遍历（#5），Mock 仅主页面一个 frame
+    page.frames = [page]
     return page, locator
 
 
@@ -95,12 +97,12 @@ class TestClickPageChanged:
 
     @pytest.mark.asyncio
     async def test_fingerprint_failure_does_not_crash(self):
-        """evaluate 失败时指纹返回空 dict，不影响 click 结果"""
+        """evaluate 失败时该帧指纹为 0，不影响 click 结果（#5 单帧失败不中断）"""
         page, _ = make_page_mock()
         page.evaluate = AsyncMock(side_effect=Exception("page closed"))
         tool = BrowserTool(page)
         fp = await tool._page_fingerprint()
-        assert fp == {}
+        assert fp == {"elements": 0, "text_len": 0}, fp
 
 
 class TestClickFollowNewTab:
@@ -159,12 +161,30 @@ class TestPageFingerprint:
     @pytest.mark.asyncio
     async def test_fingerprint_returns_dict(self):
         page = AsyncMock()
+        page.frames = [page]
         page.evaluate = AsyncMock(
             return_value={"elements": 5, "text_len": 10}
         )
         tool = BrowserTool(page)
         fp = await tool._page_fingerprint()
         assert fp == {"elements": 5, "text_len": 10}
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_accumulates_across_frames():
+    """跨 frame 累加指纹（#5）：iframe 内容变化也应计入 elements/text_len"""
+    main = AsyncMock()
+    sub = AsyncMock()
+    main.frames = [main, sub]
+    main.evaluate = AsyncMock(
+        return_value={"elements": 5, "text_len": 10}
+    )
+    sub.evaluate = AsyncMock(
+        return_value={"elements": 3, "text_len": 40}
+    )
+    tool = BrowserTool(main)
+    fp = await tool._page_fingerprint()
+    assert fp == {"elements": 8, "text_len": 50}
 
 
 class TestWaitAndScrollDefensive:

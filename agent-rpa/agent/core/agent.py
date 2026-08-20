@@ -422,6 +422,28 @@ class Agent:
         except Exception as e:
             logger.warning("⚠️  Planner.on_action_result 执行异常: {}", e)
 
+    def _is_frame_action(self, snapshot: Optional[Snapshot], action: Action) -> bool:
+        """判断 action 的目标元素是否位于 iframe 内（#5）。
+
+        仅当 target_id 命中 Snapshot 且 frame_path 非空时才为 True。
+        若无法确认（如无 snapshot 或非 target_id 定位），保守返回 False。
+        """
+        if not snapshot or not action.target_id:
+            return False
+        for el in snapshot.get_interactive_elements():
+            if el.element_id == action.target_id:
+                return bool(getattr(el, "frame_path", ()))
+        return False
+
+    async def _refresh_if_frame(self, snapshot, action) -> Snapshot:
+        """iframe Action 失败后：重新 Observe，避免复用点击后可能已失效的
+        frame_path / target_id（#5）。无法观察时回退原 snapshot。
+        """
+        if not self._is_frame_action(snapshot, action):
+            return snapshot
+        fresh = await self._safe_observe()
+        return fresh if fresh is not None else snapshot
+
     async def _execute_action_with_retry(
         self,
         action: Action,
@@ -433,7 +455,8 @@ class Agent:
 
         策略（用户确认）：
         1. 首次执行；
-        2. 失败 → 机械重试 1 次（处理瞬时错误，如元素刚渲染）；
+        2. 失败 → 机械重试 1 次（处理瞬时错误，如元素刚渲染；iframe Action
+           重试前重新 Observe，避免复用失效的 frame_path / target_id —— #5）；
         3. 仍失败 → Reflection：Planner 分析失败原因给出替代动作并执行 1 次；
         4. 仍失败 → 返回最后一次失败 Observation（上层中止任务）。
 
@@ -448,6 +471,7 @@ class Agent:
 
         # 2. 机械重试 1 次
         logger.warning("🔁 [Step {}] 执行失败: {} → 机械重试", step, observation.error)
+        snapshot = await self._refresh_if_frame(snapshot, action)
         retry = await self._safe_execute(action, snapshot)
         if retry is None:
             return None, action

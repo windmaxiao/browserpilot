@@ -465,6 +465,77 @@ async def test_task_planner_drives_two_phase_flow():
 # ── V0.4 前瞻：失败重试（机械 1 次 → Reflection 1 次 → 中止） ────────
 
 @pytest.mark.asyncio
+async def test_frame_action_refreshes_snapshot_on_retry():
+    """V1.0 #5：iframe Action 失败后机械重试前重新 Observe，
+    用最新 Snapshot 重新解析 frame_path，不复用点击后可能失效的路径"""
+    def snap(frame_path):
+        s = Snapshot(title="t", url="https://example.com")
+        s.buttons = [ElementInfo(
+            text="btn", tag="button", element_type="button",
+            selector="#frame-btn", element_id="e1", frame_path=frame_path,
+        )]
+        return s
+
+    snap_before = snap(("iframe >> nth=0",))
+    snap_after = snap(("iframe >> nth=1",))   # Frame 重建后位置变化
+
+    observer = MagicMock()
+    observer.observe = AsyncMock(side_effect=[snap_after])  # 刷新时返回新位置
+
+    planner = _PlannerStub([])
+    tool = MagicMock()
+    tool.click = AsyncMock(side_effect=[
+        Observation.fail("元素未就绪"),   # 首次失败（旧 frame_path 失效）
+        Observation.ok(page_changed=True),  # 刷新后重试成功
+    ])
+    tool.current_url = "https://example.com"
+    tool.current_title = AsyncMock(return_value="t")
+
+    agent = Agent(observer, planner, Executor(tool), max_steps=5)
+    action = Action(action="click", target_id="e1")
+
+    obs, _ = await agent._execute_action_with_retry(action, snap_before, step=1)
+
+    assert obs.success is True
+    assert tool.click.await_count == 2
+    # 机械重试前重新观察，第二次执行使用新 frame_path（而非失效的 nth=0）
+    assert tool.click.call_args_list[1].kwargs["frame_path"] == ("iframe >> nth=1",)
+    # 直接调用 retry：首次使用传入 snapshot，仅刷新阶段观察 1 次
+    assert observer.observe.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_frame_action_retry_without_observe_stays_snapshot():
+    """V1.0 #5：非 iframe Action 失败重试不触发重新 Observe，保持原行为"""
+    snap_plain = Snapshot(title="t", url="https://example.com")
+    snap_plain.buttons = [ElementInfo(
+        text="btn", tag="button", element_type="button",
+        selector="#plain-btn", element_id="e2",
+    )]  # frame_path 默认 () 主页面
+
+    observer = MagicMock()
+    observer.observe = AsyncMock(return_value=snap_plain)
+    planner = _PlannerStub([])
+    tool = MagicMock()
+    tool.click = AsyncMock(side_effect=[
+        Observation.fail("瞬时失败"),
+        Observation.ok(page_changed=True),
+    ])
+    tool.current_url = "https://example.com"
+    tool.current_title = AsyncMock(return_value="t")
+
+    agent = Agent(observer, planner, Executor(tool), max_steps=5)
+    action = Action(action="click", target_id="e2")
+
+    obs, _ = await agent._execute_action_with_retry(action, snap_plain, step=1)
+
+    assert obs.success is True
+    assert tool.click.await_count == 2
+    # 主页面 action 复用原 snapshot，不额外观察
+    assert observer.observe.await_count == 0
+
+
+@pytest.mark.asyncio
 async def test_mechanical_retry_recovers():
     """执行失败后机械重试 1 次成功 → 任务继续并完成"""
     agent, planner, tool = make_mocks([

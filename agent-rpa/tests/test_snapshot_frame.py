@@ -280,3 +280,29 @@ async def test_click_each_duplicate_id_iframe(page):
     for seg in ("iframe >> nth=0", "iframe >> nth=1"):
         status = page.frame_locator("iframe >> nth=1").frame_locator(seg).locator("#dup-status")
         assert await status.inner_text() == "已被点击"
+
+
+@pytest.mark.asyncio
+async def test_iframe_content_change_detected(page):
+    """V1.0 #5：跨 frame DOM 指纹——纯 iframe 内容变化应使 page_changed=True
+
+    点击 iframe 内按钮仅改变 iframe 内文本（URL/顶层 DOM 不变），
+    旧指纹（仅主页面）会误判为未变化；现按所有 frame 累计应判为已变化。
+    """
+    tool = BrowserTool(page)
+    # 页面上当前重复按钮状态为使 Text 变化前的"占位元素"：
+    # 直接构造一次纯 iframe 内容变化场景
+    snap = await SnapshotGenerator(page).generate()
+    btn = next(b for b in snap.buttons if b.text == "重复按钮")
+    assert btn.frame_path  # 确认目标是 iframe 内元素
+
+    obs = await tool.click(btn.selector, frame_path=btn.frame_path)
+
+    assert obs.success, obs.error
+    # iframe 内 #dup-status 文本从"未点击"→"已被点击"（text_len 变化），
+    # 即使 URL/标题/顶层 DOM 不变也应判定 page_changed
+    assert obs.page_changed is True, f"纯 iframe 内容变化未判定 page_changed: {obs}"
+    status = page.frame_locator("iframe >> nth=1").frame_locator(
+        btn.frame_path[-1]
+    ).locator("#dup-status")
+    assert await status.inner_text() == "已被点击"
