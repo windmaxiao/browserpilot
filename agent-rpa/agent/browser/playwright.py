@@ -97,6 +97,7 @@ class BrowserTool:
         selector: str,
         timeout: int = 5000,
         force: bool = False,
+        frame_path=(),
     ) -> Observation:
         """点击元素
 
@@ -109,7 +110,7 @@ class BrowserTool:
         logger.info("🖱️ click: {}", selector)
         start = time.time()
         try:
-            locator = self._page.locator(selector)
+            locator = await self._locator(selector, frame_path)
             await locator.wait_for(state="visible", timeout=timeout)
             old_url = self._page.url
             old_title = await self._page.title()
@@ -155,12 +156,13 @@ class BrowserTool:
         text: str,
         timeout: int = 5000,
         clear_first: bool = True,
+        frame_path=(),
     ) -> Observation:
         """输入文本"""
         logger.info("⌨️ input: {} | text: {}", selector, text[:80])
         start = time.time()
         try:
-            locator = self._page.locator(selector)
+            locator = await self._locator(selector, frame_path)
             await locator.wait_for(state="visible", timeout=timeout)
             if clear_first:
                 await locator.clear()
@@ -182,12 +184,13 @@ class BrowserTool:
         selector: str,
         value: str,
         timeout: int = 5000,
+        frame_path=(),
     ) -> Observation:
         """下拉选择"""
         logger.info("📋 select: {} → {}", selector, value)
         start = time.time()
         try:
-            locator = self._page.locator(selector)
+            locator = await self._locator(selector, frame_path)
             await locator.wait_for(state="visible", timeout=timeout)
             old_url = self._page.url
             old_title = await self._page.title()
@@ -281,13 +284,14 @@ class BrowserTool:
         selector: str,
         save_path: Optional[str | Path] = None,
         timeout: int = 30000,
+        frame_path=(),
     ) -> Observation:
         """下载文件"""
         logger.info("⬇️ download: {}", selector)
         start = time.time()
         try:
             async with self._page.expect_download(timeout=timeout) as download_info:
-                locator = self._page.locator(selector)
+                locator = await self._locator(selector, frame_path)
                 await locator.click()
 
             download = await download_info.value
@@ -312,12 +316,13 @@ class BrowserTool:
         selector: str,
         file_path: str | Path,
         timeout: int = 10000,
+        frame_path=(),
     ) -> Observation:
         """上传文件"""
         logger.info("⬆️ upload: {} → {}", selector, file_path)
         start = time.time()
         try:
-            locator = self._page.locator(selector)
+            locator = await self._locator(selector, frame_path)
             await locator.wait_for(state="visible", timeout=timeout)
             await locator.set_input_files(str(file_path))
             elapsed = time.time() - start
@@ -384,6 +389,19 @@ class BrowserTool:
             return Observation.fail(error=f"截图失败: {e}", url=self._page.url)
 
     # ── 辅助方法 ────────────────────────────────────────────────────
+
+    async def _locator(self, selector: str, frame_path=()) :
+        """按 (selector, frame_path) 解析最终 Locator（V1.0 子计划 A）。
+
+        空 frame_path → 直接 `page.locator(selector)`（主页面，向后兼容）；
+        非空 → 逐层 `frame_locator(seg)` 穿透 iframe，最后对目标 frame 定位元素。
+        """
+        from playwright.async_api import Locator
+        target: object = self._page
+        for seg in frame_path:
+            target = target.frame_locator(seg)
+        locator: Locator = target.locator(selector)
+        return locator
 
     async def _page_fingerprint(self) -> dict:
         """轻量 DOM 指纹，用于检测页面内容变化（SPA 等无导航场景）。

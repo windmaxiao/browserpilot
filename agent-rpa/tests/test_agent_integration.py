@@ -69,9 +69,12 @@ async def test_three_step_success_flow():
     assert len(agent.history) == 2
     assert agent.current_step == 3
     tool.input.assert_awaited_once_with(
-        "#search-box", "北京时间", timeout=5000, clear_first=True
-    )
-    tool.click.assert_awaited_once_with("#search-btn", timeout=5000, force=False)
+            "#search-box", "北京时间", timeout=5000, clear_first=True,
+            frame_path=(),
+        )
+    tool.click.assert_awaited_once_with(
+            "#search-btn", timeout=5000, force=False, frame_path=()
+        )
 
 
 @pytest.mark.asyncio
@@ -98,7 +101,9 @@ async def test_selector_only_action_reaches_tool():
     obs = await agent.run("点击 提交")
 
     assert obs.success is True
-    tool.click.assert_awaited_once_with("#submit", timeout=5000, force=False)
+    tool.click.assert_awaited_once_with(
+        "#submit", timeout=5000, force=False, frame_path=()
+    )
 
 
 @pytest.mark.asyncio

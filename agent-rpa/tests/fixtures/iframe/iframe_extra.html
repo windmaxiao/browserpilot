@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>额外 iframe（无 id、含重复 id 嵌套，测试消歧）</title>
+</head>
+<body>
+  <h2>额外 iframe</h2>
+  <button id="xtra-btn">额外按钮</button>
+  <input id="xtra-input" type="text" placeholder="额外输入">
+
+  <!-- 两个重复 id 的 iframe：消歧为 #dup-f 与 iframe >> nth=1 -->
+  <iframe id="dup-f" src="iframe_dup.html"></iframe>
+  <iframe id="dup-f" src="iframe_dup.html"></iframe>
+</body>
+</html>

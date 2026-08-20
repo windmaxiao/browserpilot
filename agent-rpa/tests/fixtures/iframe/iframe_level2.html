@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>第三层 iframe</title>
+</head>
+<body>
+  <h3>第三层 iframe</h3>
+  <button id="l2-btn">第三层按钮</button>
+  <input id="l2-input" type="text" placeholder="第三层输入">
+  <p id="l2-status">未点击</p>
+  <script>
+    document.getElementById('l2-btn').addEventListener('click', function () {
+      document.getElementById('l2-status').textContent = '已被穿透点击';
+    });
+  </script>
+</body>
+</html>

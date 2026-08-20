@@ -49,21 +49,22 @@ class SnapshotGenerator:
         logger.debug("SnapshotGenerator 页面已切换 | URL: {}", page.url)
 
     async def generate(self) -> Snapshot:
-        """生成当前页面的 Snapshot"""
+        """生成当前页面的 Snapshot（V1.0 子计划 A：递归 iframe）"""
         logger.info("📄 生成 Snapshot...")
         start = time.time()
         # element_id 仅在单次 Snapshot 内有效，每次生成前重置（V0.2 计划 2.1）
         self._element_counter = 0
         try:
-            title = await self._page.title()
-            url = self._page.url
-
-            # 并行提取各类元素
-            buttons = await self._extract_buttons()
-            inputs = await self._extract_inputs()
-            links = await self._extract_links()
-            texts = await self._extract_texts()
-            selects = await self._extract_selects()
+            title, url = await self._main_title_url()
+            # 遍历所有 frame scope（主页面 + 嵌套 iframe），每层各提取元素
+            buttons, inputs, links, texts, selects = [], [], [], [], []
+            scopes = await self._iter_scopes()
+            for scope, frame_path in scopes:
+                buttons += await self._extract_buttons(scope, frame_path)
+                inputs += await self._extract_inputs(scope, frame_path)
+                links += await self._extract_links(scope, frame_path)
+                texts += await self._extract_texts(scope, frame_path)
+                selects += await self._extract_selects(scope, frame_path)
             loading = await self._is_loading()
         except Exception as e:
             # 页面已被关闭（用户手动关闭 / 弹窗跳转）时不崩溃，返回空 Snapshot。
@@ -89,64 +90,142 @@ class SnapshotGenerator:
             loading=loading,
         )
 
-    async def _extract_buttons(self) -> list[ElementInfo]:
+    # ── iframe scope 遍历（V1.0 子计划 A）───────────────────────────
+
+    async def _main_title_url(self) -> tuple[str, str]:
+        """返回主页面 title / url（跨 frame 遍历时依旧以主页面为准）。"""
+        title = await self._page.title()
+        return title, self._page.url
+
+    async def _iter_scopes(self) -> list[tuple]:
+        """遍历所有 element scope，返回 [(scope, frame_path), ...]。
+
+        - 主页面 frame_path=()；
+        - 对应用 Mock Page（非真实 Playwright Page）时仅返回主页面，保持向后兼容。
+        """
+        from playwright.async_api import Page as _Page
+        if not isinstance(self._page, _Page):
+            return [(self._page, ())]
+        scopes: list[tuple] = []
+        await self._walk_scopes(self._page.main_frame, (), scopes)
+        return scopes
+
+    async def _walk_scopes(
+        self, frame, frame_path: tuple, scopes: list
+    ) -> None:
+        """递归遍历 frame 树：进入每个 iframe 与其可见元素 scope。"""
+        scopes.append((frame, frame_path))
+        try:
+            iframe_els = await frame.query_selector_all("iframe, frame, object")
+        except Exception:
+            return
+        if not iframe_els:
+            return
+        segments = await self._frame_segments(iframe_els)
+        for el, seg in zip(iframe_els, segments):
+            try:
+                child = await el.content_frame()
+            except Exception:
+                child = None
+            if child is None:
+                continue  # iframe 尚未加载
+            await self._walk_scopes(child, frame_path + (seg,), scopes)
+
+    async def _frame_segments(self, iframe_els: list) -> list[str]:
+        """为同一父 document 内的 iframe 元素生成唯一定位段。
+
+        优先级：id → name → 父内位置（`iframe >> nth=j`，按 DOM 顺序消歧）。
+        与 ElementInfo.selector 契约一致：每段都是父 document 内可定位该 iframe
+        元素的选择器，重复 id/无 id 时用位置索引保证唯一。
+        """
+        base = []
+        for el in iframe_els:
+            el_id = await self._frame_attr(el, "id")
+            if el_id:
+                base.append(f"#{self._css_escape_ident(el_id)}")
+                continue
+            name = await self._frame_attr(el, "name")
+            if name:
+                base.append(f'iframe[name="{self._css_escape_string(name)}"]')
+                continue
+            base.append(None)  # 交由位置消歧
+        seen: dict[str, int] = {}
+        result = []
+        for j, seg in enumerate(base):
+            if seg is not None and seg not in seen:
+                seen[seg] = 0
+                result.append(seg)
+            else:
+                result.append(f"iframe >> nth={j}")
+        return result
+
+    @staticmethod
+    async def _frame_attr(el, key: str) -> str:
+        try:
+            return (await el.get_attribute(key)) or ""
+        except Exception:
+            return ""
+
+    # ── 提取方法（支持 scope + frame_path）──────────────────────────
+
+    async def _extract_buttons(self, scope, frame_path=()) -> list[ElementInfo]:
         """提取所有可点击按钮"""
-        elements = await self._page.query_selector_all(
+        elements = await scope.query_selector_all(
             "button, [role='button'], input[type='submit'], input[type='button'], "
             "a[class*='btn'], [class*='button']"
         )
         infos = await asyncio.gather(
-            *(self._extract_element_info(el, i) for i, el in enumerate(elements))
+            *(self._extract_element_info(el, i, frame_path) for i, el in enumerate(elements))
         )
         result = [info for info in infos if info and info.text.strip()]
         self._disambiguate_selectors(result)
         return result
 
-    async def _extract_inputs(self) -> list[ElementInfo]:
+    async def _extract_inputs(self, scope, frame_path=()) -> list[ElementInfo]:
         """提取所有输入框"""
-        elements = await self._page.query_selector_all(
+        elements = await scope.query_selector_all(
             "input:not([type='hidden']):not([type='submit']):not([type='button']), "
             "textarea, [contenteditable='true'], [role='textbox']"
         )
         infos = await asyncio.gather(
-            *(self._extract_element_info(el, i) for i, el in enumerate(elements))
+            *(self._extract_element_info(el, i, frame_path) for i, el in enumerate(elements))
         )
         result = [info for info in infos if info]
         self._disambiguate_selectors(result)
         return result
 
-    async def _extract_links(self) -> list[ElementInfo]:
+    async def _extract_links(self, scope, frame_path=()) -> list[ElementInfo]:
         """提取所有链接"""
-        elements = await self._page.query_selector_all("a[href]")
+        elements = await scope.query_selector_all("a[href]")
         infos = await asyncio.gather(
-            *(self._extract_element_info(el, i) for i, el in enumerate(elements))
+            *(self._extract_element_info(el, i, frame_path) for i, el in enumerate(elements))
         )
         result = [info for info in infos if info and info.text.strip()]
         self._disambiguate_selectors(result)
         return result
 
-    async def _extract_texts(self) -> list[ElementInfo]:
+    async def _extract_texts(self, scope, frame_path=()) -> list[ElementInfo]:
         """提取页面上重要的文本块"""
-        elements = await self._page.query_selector_all(
+        elements = await scope.query_selector_all(
             "h1, h2, h3, h4, h5, h6, p, span, label, li, td, th, strong, em"
         )
         infos = await asyncio.gather(
-            *(self._extract_element_info(el, i) for i, el in enumerate(elements))
+            *(self._extract_element_info(el, i, frame_path) for i, el in enumerate(elements))
         )
         return [info for info in infos if info and info.text.strip()]
 
-    async def _extract_selects(self) -> list[ElementInfo]:
+    async def _extract_selects(self, scope, frame_path=()) -> list[ElementInfo]:
         """提取下拉选择框"""
-        elements = await self._page.query_selector_all("select")
+        elements = await scope.query_selector_all("select")
         infos = await asyncio.gather(
-            *(self._extract_element_info(el, i) for i, el in enumerate(elements))
+            *(self._extract_element_info(el, i, frame_path) for i, el in enumerate(elements))
         )
         result = [info for info in infos if info]
         self._disambiguate_selectors(result)
         return result
 
     async def _extract_element_info(
-        self, el, index: int
+        self, el, index: int, frame_path: tuple = ()
     ) -> ElementInfo | None:
         """从单个元素提取信息。
 
@@ -213,6 +292,7 @@ class SnapshotGenerator:
             placeholder=all_attrs.get("placeholder", ""),
             attributes=attributes,
             index=index,
+            frame_path=frame_path,
         )
 
     async def _build_selector(

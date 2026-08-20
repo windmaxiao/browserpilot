@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>三层 iframe 顶层</title>
+</head>
+<body>
+  <h1>顶层页面</h1>
+  <button id="top-btn">顶层按钮</button>
+  <input id="top-input" type="text" placeholder="顶层输入">
+
+  <!-- 有 id 的 iframe：正常路径段 #frame-level1 -->
+  <iframe id="frame-level1" src="iframe_level1.html"></iframe>
+
+  <!-- 无 id 无 name 的 iframe：位置消歧（父内第一个无 id iframe） -->
+  <iframe src="iframe_extra.html"></iframe>
+
+  <script>
+    document.getElementById('top-btn').addEventListener('click', function () {
+      this.textContent = '顶层按钮已点击';
+    });
+  </script>
+</body>
+</html>

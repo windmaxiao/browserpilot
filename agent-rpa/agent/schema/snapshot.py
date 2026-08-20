@@ -51,6 +51,14 @@ class ElementInfo:
     index: int = 0
     """在同类元素中的序号（用于区分重复文本）"""
 
+    frame_path: tuple[str, ...] = ()
+    """
+    iframe 定位路径（V1.0 子计划 A）。
+    空元组 () 表示主页面；非空时元组中每一段是父 document 内唯一定位
+    该 iframe 元素的 selector。执行时按顺序构建
+    page.frame_locator(seg).frame_locator(seg)... 最后再 .locator(selector)。
+    """
+
 
 @dataclass
 class Snapshot:

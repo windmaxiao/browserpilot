@@ -244,6 +244,7 @@ class TestTargetIdResolution:
             'button:has-text("登录")',
             timeout=5000,
             force=False,
+            frame_path=(),
         )
 
     @pytest.mark.asyncio
@@ -266,6 +267,7 @@ class TestTargetIdResolution:
             "hello",
             timeout=5000,
             clear_first=True,
+            frame_path=(),
         )
 
     @pytest.mark.asyncio

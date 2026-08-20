@@ -34,6 +34,7 @@ class Executor:
     def __init__(self, browser_tool: BrowserTool):
         self._tool = browser_tool
         self._element_map: dict[str, str] = {}
+        self._frame_map: dict[str, tuple] = {}
         logger.debug("Executor 初始化完成")
 
     async def execute(self, action: Action, snapshot: Snapshot | None = None) -> Observation:
@@ -46,7 +47,12 @@ class Executor:
             action: 要执行的动作
             snapshot: 当前页面的 Snapshot（用于通过 target_id 定位元素）
         """
-        self._element_map = self._build_element_map(snapshot) if snapshot else {}
+        if snapshot:
+            self._element_map = self._build_element_map(snapshot)
+            self._frame_map = self._build_frame_map(snapshot)
+        else:
+            self._element_map = {}
+            self._frame_map = {}
 
         errors = action.validate()
         if errors:
@@ -88,6 +94,7 @@ class Executor:
                 selector,
                 timeout=action.params.get("timeout", 5000),
                 force=action.params.get("force", False),
+                frame_path=self._resolve_frame_path(action),
             )
         if action.target_id:
             return Observation.fail(
@@ -108,6 +115,7 @@ class Executor:
                 action.value,
                 timeout=action.params.get("timeout", 5000),
                 clear_first=action.params.get("clear_first", True),
+                frame_path=self._resolve_frame_path(action),
             )
         if action.target_id:
             return Observation.fail(
@@ -127,6 +135,7 @@ class Executor:
                 selector,
                 action.value,
                 timeout=action.params.get("timeout", 5000),
+                frame_path=self._resolve_frame_path(action),
             )
         if action.target_id:
             return Observation.fail(
@@ -173,6 +182,7 @@ class Executor:
                 selector,
                 save_path=save_path,
                 timeout=action.params.get("timeout", 30000),
+                frame_path=self._resolve_frame_path(action),
             )
         if action.target_id:
             return Observation.fail(
@@ -192,6 +202,7 @@ class Executor:
                 selector,
                 action.value,
                 timeout=action.params.get("timeout", 10000),
+                frame_path=self._resolve_frame_path(action),
             )
         if action.target_id:
             return Observation.fail(
@@ -235,6 +246,35 @@ class Executor:
                 mapping[el.element_id] = el.selector
         logger.debug("构建元素映射: {} 个条目", len(mapping))
         return mapping
+
+    def _build_frame_map(self, snapshot: Snapshot) -> dict[str, tuple]:
+        """
+        从 Snapshot 构建 element_id → frame_path 的映射（V1.0 子计划 A）。
+        供元素定位时透传 iframe 链。无 frame_path（主页面）用空元组。
+        """
+        mapping: dict[str, tuple] = {}
+        for el in snapshot.get_interactive_elements():
+            if not el.element_id:
+                continue
+            # 兼容旧版/Mock 元素：frame_path 非元组（如 MagicMock）时回退空元组
+            fp = getattr(el, "frame_path", ())
+            mapping[el.element_id] = fp if isinstance(fp, tuple) else ()
+        return mapping
+
+    def _resolve_frame_path(self, action: Action) -> tuple:
+        """
+        解析目标元素的 frame_path（V1.0 子计划 A）。
+
+        优先级与 _resolve_target 一致：
+        1. params["selector"] 显式指定 → 主页面（空元组）
+        2. target_id 命中 → 从 Snapshot 的 frame_path 映射查询
+        3. 其他 → 主页面（空元组）
+        """
+        if action.params.get("selector"):
+            return ()
+        if action.target_id and action.target_id in self._frame_map:
+            return self._frame_map[action.target_id]
+        return ()
 
     def _resolve_target(self, action: Action) -> str | None:
         """
