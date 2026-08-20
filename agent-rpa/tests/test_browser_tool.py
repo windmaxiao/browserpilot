@@ -252,3 +252,52 @@ class TestWaitAndScrollDefensive:
         obs = await tool.select("#city", "北京")
         assert obs.success is True
         page.wait_for_load_state.assert_awaited()
+
+
+class TestBrowserManagerLaunch:
+    """BrowserManager.start() 的 launch 参数透传（待解决问题 #4）"""
+
+    @pytest.mark.asyncio
+    async def test_unknown_launch_kwargs_passthrough(self, monkeypatch):
+        """未接管的自定义 launch 参数应原样透传，不再静默丢弃"""
+        from agent.browser import playwright as pw_mod
+        from agent.browser.playwright import BrowserManager
+
+        captured = {}
+        fake_browser = MagicMock()
+        fake_context = MagicMock()
+        fake_context.new_page = AsyncMock(return_value=MagicMock())
+        fake_browser.new_context = AsyncMock(return_value=fake_context)
+
+        async def fake_launch(**kw):
+            captured.update(kw)
+            return fake_browser
+
+        fake_pw = MagicMock()
+        fake_pw.chromium.launch = fake_launch
+
+        self._patch_async_playwright(monkeypatch, pw_mod, fake_pw)
+
+        mgr = BrowserManager(
+            headless=True,
+            user_data_dir="C:/tmp/profile",
+            devtools=True,
+            download_behaviour={"behavior": "allow"},
+        )
+        await mgr.start()
+
+        assert captured["headless"] is True
+        assert captured["user_data_dir"] == "C:/tmp/profile"
+        assert captured["devtools"] is True
+        assert captured["download_behaviour"] == {"behavior": "allow"}
+        # 框架管理的键不接受用户参数覆盖
+        assert "args" in captured
+
+    @staticmethod
+    def _patch_async_playwright(monkeypatch, mod, fake_pw):
+        async def _start():
+            return fake_pw
+
+        fake_launcher = MagicMock()
+        fake_launcher.start = _start
+        monkeypatch.setattr(mod, "async_playwright", lambda: fake_launcher)

@@ -541,12 +541,19 @@ class BrowserManager:
             if not self._headless:
                 launch_args.append("--start-maximized")
 
-            # 构建 launch 选项
+            # 本框架接管/覆盖的 launch 键：这些值由框架决定，不接受用户参数直接覆盖
+            _managed = {"headless", "slow_mo", "args", "executable_path", "channel", "proxy"}
+            # 其余合法 launch 参数（user_data_dir/env/devtools/IgnoreDefaultArgs 等）
+            # 原样透传，不再静默丢弃（待解决问题 #4）
             launch_options = {
+                k: v for k, v in self._launch_kwargs.items() if k not in _managed
+            }
+
+            launch_options.update({
                 "headless": self._headless,
                 "slow_mo": self._slow_mo,
                 "args": launch_args,
-            }
+            })
 
             # 优先使用 executable_path，其次 channel，否则用 Playwright 内置 Chromium
             if self._launch_kwargs.get("executable_path"):
