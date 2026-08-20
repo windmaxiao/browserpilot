@@ -21,13 +21,11 @@
 ```
 browserpilot/
 ├── AGENTS.md                          # ← 本文件，AI 编程助手手册
-├── 待解决问题.md                       # 已知问题追踪（仅剩未解决项）
+├── 待解决问题.md                       # 已知问题追踪（仅剩未解决项，不入 git）
 ├── 使用文档.md                         # 面向使用者的安装/运行/规则引擎指南
-├── V0.2开发计划.md                     # V0.2 开发计划（✅ 已完成）
-├── V0.3开发计划.md                     # V0.3 开发计划（✅ 已完成）
-├── V0.5开发计划.md                     # V0.5 开发计划（✅ 已完成）
-├── V0.5开发计划.md                     # V0.5 开发计划（✅ 已完成）
 ├── Agentic_RPA_项目规划_V0.1.md        # 原始项目规划文档
+├── V0.5开发计划.md                     # V0.5 开发计划（✅ 已完成）
+├── V1.0开发计划（新）.md               # V1.0 开发计划（iframe 能力已完成，其余规划中）
 ├── README.md                          # 项目入口 README
 ├── LICENSE                            # Apache License 2.0
 ├── .gitignore
@@ -78,9 +76,10 @@ browserpilot/
     │   ├── llm_agent_demo.py          # LLM Agent 自由模式 Demo（本地搜索页）
     │   ├── llm_baidu_demo.py          # LLM Agent 两阶段 Demo（真实百度）
     │   ├── check_llm_connectivity.py  # 7 家国内大模型预设连通性测试
-    │   └── search_page.html           # 本地确定性搜索页
+    │   ├── search_page.html           # 本地确定性搜索页
+    │   └── ex_robot/ydgx/             # 业务示例（LLM 局部辅助 + 多层 iframe，不入 git）
     │
-    └── tests/                         # 15 个文件，321 个用例
+    └── tests/                         # 16 个文件，300+ 个用例
         ├── __init__.py
         ├── test_action.py             # Action Schema + 参数校验
         ├── test_observation.py        # Observation Schema
@@ -89,12 +88,12 @@ browserpilot/
         ├── test_planner.py            # RuleBasedPlanner 规则引擎（8 条规则）
         ├── test_browser_tool.py       # BrowserTool（click 指纹/wait/scroll 防护）
         ├── test_snapshot_generator.py # SnapshotGenerator（selector 转义/ID 生命周期）
+        ├── test_snapshot_frame.py     # SnapshotGenerator 多层 iframe 递归/消歧（V1.0 子计划 A）
         ├── test_regression_fixed_issues.py  # 已修复问题回归
         ├── test_agent_integration.py  # Agent 主循环 Mock 集成（含 LLM 驱动/步骤模式）
         ├── test_llm_client.py         # LLMClient 协议 / Mock / 错误分类
         ├── test_prompt_serialization.py      # Snapshot 序列化 / URL 脱敏 / 历史窗口
         ├── test_llm_planner.py        # LLMPlanner 解析 / 一次修复 / 完整链路
-        ├── test_memory.py             # Memory 摘要/折叠/上下文压缩（V0.5）
         ├── test_memory.py             # Memory 摘要/折叠/上下文压缩（V0.5）
         ├── test_logging.py            # setup_logging 控制台 / 文件 sink
         └── test_task_queue.py         # TaskStep/TaskQueue/拆解解析/TaskPlanner
@@ -219,6 +218,7 @@ class Observation:
 @dataclass
 class ElementInfo:
     text: str               # 可见文本（最长 200 字符）
+    element_id: str         # 全局唯一元素 ID（e0, e1, ...，单次 Snapshot 内有效）
     tag: str                # HTML 标签名
     element_type: str       # 语义类型: button/link/textbox/dropdown/text/image
     selector: str           # Playwright 选择器（供内部执行使用）
@@ -227,6 +227,7 @@ class ElementInfo:
     placeholder: str        # input placeholder
     attributes: dict        # 其他重要属性
     index: int              # 同类元素中的序号
+    frame_path: tuple[str, ...]  # iframe 定位路径（V1.0 子计划 A，空元组=主页面）
 
 @dataclass
 class Snapshot:
@@ -275,20 +276,27 @@ class Snapshot:
 | `page` | 获取当前 Page 对象 |
 | `create_tool()` | 创建 BrowserTool 实例 |
 
+**iframe 定位（V1.0 子计划 A）：** BrowserTool 内部 `_locator(selector, frame_path)` 按 `(selector, frame_path)` 解析最终 Locator——空 frame_path 走 `page.locator(selector)`（主页面，向后兼容）；非空则逐层 `frame_locator(seg)` 穿透 iframe 再定位目标元素。
+
 #### `snapshot.py` — SnapshotGenerator
 
 从 Playwright Page 提取语义信息生成 Snapshot。
 
 | 方法 | 说明 |
 |------|------|
-| `generate()` | 生成完整 Snapshot（并行提取各类元素） |
+| `generate()` | 生成完整 Snapshot（递归 iframe，逐 scope 批量提取） |
 | `detect_page_type()` | 通过 URL/Title 推断页面类型 |
-| `_extract_buttons()` | button, [role=button], input[submit], a.btn, *.button |
+| `_iter_scopes()` / `_walk_scopes()` | 递归遍历 frame 树（主页面 + 嵌套 iframe），每个子 frame 做有限超时加载等待（`asyncio.wait_for` 兜底），超时跳过该帧 |
+| `_frame_segments()` | 为同一父 document 内 iframe 生成唯一定位段（id → name → 位置 `nth=j`）；重复 id/name 一律改用位置索引消歧 |
+| `_extract_scope()` | 单 scope 提取：真实 Frame/Page 一次 `frame.evaluate` 返回 6 类原始数据（含可点击文本）；Mock 回退逐元素 |
+| `_extract_buttons()` | button, [role=button], input[submit], a[class*=btn], [class*=button] |
 | `_extract_inputs()` | input(非hidden), textarea, contenteditable, [role=textbox] |
 | `_extract_links()` | a[href] |
 | `_extract_texts()` | h1-h6, p, span, label, li, td, th, strong, em |
 | `_extract_selects()` | select |
-| `_build_selector()` | 生成选择器：data-testid > id > role > aria-label > 标签+文本 > 标签名（ID/属性值经 CSS 转义） |
+| `_build_selector()` / `_build_selector_from()` | 生成选择器：data-testid > id > role > aria-label > 标签+文本 > 标签名（ID/属性值经 CSS 转义）；后者为批量路径纯函数版 |
+
+批量 JS 提取（`_EXTRACT_JS` + `_build_infos` / `_from_raw`）：把逐元素约 15 次 CDP 调用合并为每帧 1 次 `evaluate`，解决大页面 Snapshot 生成 500s+ 的问题（详见 [待解决问题.md](待解决问题.md) #9）。
 
 ---
 
@@ -317,7 +325,7 @@ class Agent:
 - Planner 返回 None 表示无法规划
 - **异常防护**：`_safe_observe()` / `_safe_execute()` 捕获浏览器关闭等异常，优雅返回失败 Observation 而非崩溃
 - **停滞检测**：LLM 在 action 步骤中连续 2 次 wait 且页面无变化 → 提前终止；计划内 wait 步骤不计入
-- **历史记忆（V0.5）**：每步经 `_record_step()` 写入原始历史与 `HistoryMemory`，`plan_with_history` / `plan_step` / `reflect` 传 `memory.context_entries()`（摘要 + 最近窗口）而非原始全量历史
+- **iframe 定位与恢复（V1.0 子计划 A）**：`ElementInfo` 携带 `frame_path`（元组，空为主页面）；Executor 维护 `element_id → (selector, frame_path)` 映射并向 BrowserTool 透传；`target_id` 命中时优先于注入的 `params["selector"]`；frame 失效后旧路径作废，需重新 Observe 再解析 `target_id`
 - **历史记忆（V0.5）**：每步经 `_record_step()` 写入原始历史与 `HistoryMemory`，`plan_with_history` / `plan_step` / `reflect` 传 `memory.context_entries()`（摘要 + 最近窗口）而非原始全量历史
 
 #### `executor.py` — Executor（Action → BrowserTool 翻译层）
@@ -332,6 +340,7 @@ class Executor:
   1. `params["selector"]` 显式指定
   2. CSS 选择器风格（以 `#`, `.`, `[`, `:` 开头）
   3. 默认 `:has-text("...")` 子串匹配（与 SnapshotGenerator 统一）
+- `_build_frame_map(snapshot)` / `_resolve_frame_path(action)` — iframe 支持（V1.0 子计划 A）：构建 `element_id → frame_path` 映射；`target_id` 命中时透传 frame_path 给 BrowserTool，且**优先于注入的 `params["selector"]`**
 
 #### `observer.py` — Observer
 
@@ -392,19 +401,6 @@ class Observer:
 - Agent 每步经 `_record_step()` 写入记忆并触发折叠；`plan_with_history` / `plan_step` / `reflect` 改传 `context_entries()`。
 - 序列化协议：内存条目 `{"kind": "summary", "text": ...}` → prompts 层渲染为 `{"summary": ...}` 且恒在头部。
 
----
-
-#### `memory.py` — HistoryMemory（V0.5 Memory）
-
-增量式历史记忆：超出滑动窗口的旧条目按批折叠为摘要（默认 `window=5, batch=10`，每条目只摘要一次），`context_entries()` 输出「摘要 + 最近窗口」压缩上下文（摘要不占窗口名额）。
-
-| 成员 | 说明 |
-|------|------|
-| `summarize_entries()` | 规则式摘要纯函数：每条历史 → 一行「动作 目标 → 结果」，不含输入值/URL 等敏感内容 |
-| `add(entry)` / `maybe_summarize()` | 同步写入原始条目；达到 `window + batch` 阈值时折叠最旧一批（可注入 async LLM 摘要器替换默认规则式） |
-| `context_entries()` | 压缩上下文 = `[{"kind": "summary", "text": ...}]` + 最近窗口条目，供 Planner 序列化 |
-| `clear()` / `count` / `summary` / `recent` | 生命周期与只读视图 |
-
 ### 4.4 LLM 层 (`agent/llm/`) 与 Prompts 层 (`agent/prompts/`) — V0.3
 
 **依赖方向（单向，禁止反向）：**
@@ -449,9 +445,9 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 
 ---
 
-## 五、当前状态 (V0.5)
+## 五、当前状态 (V0.5 + V1.0 子计划 A)
 
-### 已完成（V0.1 ~ V0.5）
+### 已完成（V0.1 ~ V0.5 + V1.0 子计划 A）
 
 - ✅ 12 种 Action 类型定义 + 工厂函数 + 参数验证
 - ✅ Observation 统一返回格式
@@ -468,38 +464,25 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 - ✅ **安全边界（V0.3）**：模型上下文脱敏（无 selector/HTML/Cookie/截图，URL 敏感参数掩码）、伪造 selector 忽略、幻觉 target_id 拦截
 - ✅ **两阶段任务队列（V0.4 前瞻）**：`TaskPlanner`（`decompose` 拆解目标为步骤队列 + `plan_step` 分步决策）、`TaskStep/TaskQueue`、Agent 双模式（步骤模式/自由模式自动回退）、wait/verify 步骤由框架直接执行（不经过 LLM）、队列耗尽即完成
 - ✅ **异常防护（V0.4 前瞻）**：`_safe_observe()` / `_safe_execute()` 浏览器关闭时优雅失败；停滞检测（LLM 连续 2 次 wait 且页面无变化提前终止）
-- ✅ **Reflection 重试（V0.4）**：Agent 执行失败混合重试（机械 1 次 → `Planner.reflect()` 失败反思给出替代动作 1 次 → 仍失败尝试页面恢复 → 中止）；LLM 可重试错误（超时/限流/网络）指数退避自动重试（默认 3 次）；等待步骤框架兜底（拆解误拆 action 时按描述自动纠正为 wait 并提取毫秒）；**后退/刷新恢复**（失败后自动 back/refresh 重置页面状态再重新规划，默认最多 2 次）
+- ✅ **Reflection 重试（V0.4）**：Agent 执行失败混合重试（机械 1 次 → `Planner.reflect()` 失败反思给出替代动作 1 次 → 仍失败尝试页面恢复 → 中止）；LLM 可重试错误（超时/限流/网络）指数退避自动重试并封顶（默认 5 次、基础间隔 2s、封顶 16s，`LLMPlanner(llm_retries/llm_retry_delay/llm_retry_max_delay)` 可覆盖）；等待步骤框架兜底（拆解误拆 action 时按描述自动纠正为 wait 并提取毫秒）；**后退/刷新恢复**（失败后自动 back/refresh 重置页面状态再重新规划，默认最多 2 次）
 - ✅ **工程化增强**：`setup_logging`（控制台 + `logs/` 按天滚动文件）、Snapshot 生成并行化提速（asyncio.gather 双层并发）、新标签页轮询跟随、`.env` 零依赖加载链
+- ✅ **Snapshot 批量 JS 提取（V1.0 前性能优化）**：把逐元素约 15 次 CDP 调用合并为每帧 1 次 `frame.evaluate`（`_EXTRACT_JS` + `_extract_scope` + `_from_raw`），解决大页面（如 SAP 多层 iframe）Snapshot 生成 500s+ 的问题（详见 [待解决问题.md](待解决问题.md) #9）；真实 Page/Frame 走批量路径，Mock 自动回退逐元素路径保持测试兼容
+- ✅ **iframe 支持（V1.0 子计划 A）**：`ElementInfo` 新增 `frame_path`（元组，空为主页面）；`SnapshotGenerator` 递归遍历多层 iframe（`_iter_scopes`/`_walk_scopes`/`_frame_segments`，重复 id/name 用位置 `nth=j` 消歧，子 frame 加载有限超时跳过）；`Executor` 构建 `element_id → frame_path` 映射（target_id 优先于注入 selector）；`BrowserTool._locator` 逐层 `frame_locator` 穿透；frame 失效后重新 Observe 再解析；真实 Playwright 浏览器三层 iframe fixture 测试（`test_snapshot_frame.py`）
 - ✅ **Memory（V0.5）**：`HistoryMemory` 增量式历史记忆（滚动摘要：超出窗口的旧条目按批折叠，默认 `window=5, batch=10`，可注入异步 LLM 摘要器）、`summarize_entries()` 规则式摘要（不含输入值/URL 等敏感内容）、上下文压缩（`context_entries()` = 摘要 + 最近窗口，摘要不占窗口名额）、`serialize_history` / `build_user_prompt` 摘要协议、Agent `_record_step()` 同步记录 + `plan_with_history` / `plan_step` / `reflect` 传压缩上下文
-- ✅ 15 个测试文件，321 个用例（Schema / Executor / Planner / BrowserTool / SnapshotGenerator / Agent 集成 / LLMClient / 序列化 / LLMPlanner / Memory / Logging / TaskQueue）
-- ✅ 5 个 Demo（手动 / 规则 Agent 本地页 / 规则 Agent 百度 / LLM Agent 自由模式 / LLM Agent 两阶段真实百度，端到端跑通）
+- ✅ 16 个测试文件，300+ 个用例（Schema / Executor / Planner / BrowserTool / SnapshotGenerator / Snapshot iframe / Agent 集成 / LLMClient / 序列化 / LLMPlanner / Memory / Logging / TaskQueue）
+- ✅ 5 个 Demo（手动 / 规则 Agent 本地页 / 规则 Agent 百度 / LLM Agent 自由模式 / LLM Agent 两阶段真实百度，端到端跑通）+ 1 个业务示例（`examples/ex_robot/ydgx`：LLM 局部辅助 + 多层 iframe + 失败回退确定性，不入 git）
 
 ### 已知问题（详见 [待解决问题.md](待解决问题.md)，下表为摘要）
 
 | # | 问题 | 优先级 | 状态 |
 |---|------|--------|------|
-| 1 | Snapshot 与 Executor 选择器不一致 | 🔴 | ✅ 已修复 |
-| 2 | click/page_changed 始终为 True | 🔴 | ✅ 已修复 |
 | 3 | texts 含 span 噪音 | 🟡 | 暂不处理 |
-| 4 | BrowserTool/SnapshotGenerator 无测试 | 🟡 | ✅ 已修复（BrowserTool + SnapshotGenerator + Agent 集成测试） |
-| 5 | _smart_wait 每次等 8 秒 | 🟡 | ✅ 已修复（wait_for_load_state 3s） |
-| 6 | ElementInfo 不保留 data-testid | 🟢 | ✅ 已修复（存入 attributes） |
-| 7 | Observation.ok() data 参数风险 | 🟢 | ✅ 已修复 |
-| 8 | 定位契约不完整 | 🔴 | ✅ 已修复 |
-| 9 | data 嵌套已影响功能 | 🔴 | ✅ 已修复 |
-| 10 | page_changed 仅比较 URL | 🟡 | ✅ 已修复（URL + 标题 + DOM 指纹） |
-| 11 | Snapshot 未过滤不可见元素 | 🟡 | ✅ 已修复 |
-| 12 | Action.validate() 验证不完整 | 🟡 | ✅ 已修复（参数契约见 V0.2 计划 2.2） |
-| 13 | 测试命令与安装方式不匹配 | 🟡 | ✅ 已修复 |
-| 15 | BrowserTool.wait() 非法参数未转 Observation | 🟡 | ✅ 已修复 |
-| 16 | Snapshot selector 未转义特殊字符 | 🟡 | ✅ 已修复（CSS 转义 + 优先级 2.3） |
-| 17 | element_id 多次 Snapshot 间累加 | 🟡 | ✅ 已修复（每次 generate 重置） |
-| 18 | scroll() f-string JS 注入 | 🔴 | ✅ 已修复（参数化 evaluate） |
-| 19 | _smart_wait 调用不一致 | 🟡 | ✅ 已修复（select/download 统一） |
-| 20 | Observation.fail() **data 嵌套 | 🟡 | ✅ 已修复 |
-| 23 | screenshot() 内部 import base64 | 🟢 | ✅ 已修复 |
+| 6 | Provider 预设模型名硬编码，需与官方清单核对 | 🟢 | ⏳ 待解决 |
+| 7 | 步骤模式 wait 步骤失败直接中止，无重试/恢复 | 🟢 | ⏳ 待解决 |
+| 8 | 手动 API step()/observe() 无异常防护 | 🟢 | ⏳ 待解决 |
+| 9 | Snapshot 逐元素 CDP 调用，大页面耗时 500s+ | 🔴 | 方案 1 已实现（批量 JS），方案 2/3 待定 |
 
-> 完整列表见 [待解决问题.md](待解决问题.md)：共 23 项，✅ 已修复 20 项，⏳ 待解决 2 项（#21、#22）。
+> 完整列表见 [待解决问题.md](待解决问题.md)：当前跟踪 5 项，已解决条目随修复移除，编号不复用（#9 为后续增补）。
 
 ---
 
@@ -512,7 +495,7 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 | **V0.3** | 接入 LLM：LLM Planner | `LLMClient` 协议 + 错误分类；`MockLLMClient` + `OpenAILLMClient`；`LLMPlanner`（Snapshot 脱敏序列化 → 提示词 → 安全 Action 转换 + 一次修复）；Agent `plan_with_history()` 传历史 | ✅ 完成 |
 | **V0.4** | Reflection：错误恢复与重试 | 任务步骤队列（TaskPlanner decompose→分步执行）；wait/verify 框架直执行；停滞检测；浏览器关闭异常防护；**Agent 失败重试**（机械 1 次 → Reflection 1 次 → 页面恢复 → 中止）；**LLM 可重试错误自动重试**（指数退避）；等待步骤框架兜底（action→wait 纠正）；**后退/刷新恢复** | ✅ 完成 |
 | **V0.5** | Memory：历史操作与上下文记忆 | `HistoryMemory` 增量式记忆（滚动摘要：窗口外旧条目按批折叠，默认 window=5/batch=10，可注入异步 LLM 摘要器）；`summarize_entries()` 规则式摘要；`context_entries()` 上下文压缩（摘要 + 窗口）；`serialize_history` / `build_user_prompt` 摘要协议；Agent 记录与传参接线 | ✅ 完成 |
-| **V1.0** | 完整 Agentic RPA | 登录/查询/下载/上传/Excel 长流程 | 🎯 规划中 |
+| **V1.0** | 完整 Agentic RPA | 多层 iframe 操作基座已完成（子计划 A）；登录/查询/下载/上传/Excel 长流程（子计划 D）| 🚧 子计划 A 完成，其余规划中 |
 
 ### 各版本关键关注点
 
@@ -530,12 +513,12 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 - **Planner 测试（现有）：** Mock Snapshot 验证规则匹配与状态推进
 - **BrowserTool 测试（现有）：** AsyncMock Page 对象，覆盖 click() page_changed DOM 指纹、wait()/scroll() 非法参数防护与异常转换、新标签页轮询跟随
 - **SnapshotGenerator 测试（现有）：** Mock Page 验证可见性过滤、selector 优先级与 CSS 转义、element_id 生命周期、页面关闭防御
+- **Snapshot iframe 测试（现有）：** 真实 Playwright Chromium 加载三层 iframe fixture，验证递归提取、frame_path 生成、target_id 跨 frame 唯一、重复 id 位置消歧、主页面零回归
 - **Agent 集成测试（现有）：** Mock Observer/Planner/BrowserTool 验证 run() 全链路（done / 执行失败 / 非法 Action / 最大步数 / LLM 驱动多步 / 停滞检测 / 步骤模式 wait-verify 框架直执行 / TaskPlanner 两阶段完整链路 / 观察异常防护）
 - **LLMClient 测试（现有）：** Mock 客户端响应队列 / 异常注入 / 调用记录；错误分类（可重试 vs 不可重试）；OpenAI 客户端未配 Key 提示
 - **序列化测试（现有）：** 上下文不含 selector/HTML/Cookie、URL 脱敏、元素/文本截断、序列化稳定、element_id 映射、历史窗口
 - **LLMPlanner 测试（现有）：** 合法 Action、幻觉 ID、伪造 selector、非法 action、数组输出、一次修复恢复、连续失败停止、可重试错误不重试
 - **Logging 测试（现有）：** setup_logging 控制台 / 文件 sink 行为
-- **Memory 测试（现有）：** 规则式摘要格式化与敏感字段排除、HistoryMemory 折叠阈值 / 增量只摘要一次 / 窗口边界 / clear / 自定义摘要器、serialize_history / build_user_prompt 摘要协议与纯列表回归、Agent 长任务向 Planner 传摘要且 history 原始完整
 - **Memory 测试（现有）：** 规则式摘要格式化与敏感字段排除、HistoryMemory 折叠阈值 / 增量只摘要一次 / 窗口边界 / clear / 自定义摘要器、serialize_history / build_user_prompt 摘要协议与纯列表回归、Agent 长任务向 Planner 传摘要且 history 原始完整
 - **TaskQueue 测试（现有）：** 队列消费顺序、拆解解析（wait 毫秒归一 / verify 参数 / 非法条目过滤）、TaskPlanner 拆解失败回退、plan_step 步骤上下文注入
 

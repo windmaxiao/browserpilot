@@ -119,9 +119,10 @@ agent-rpa/
 │   ├── llm_agent_demo.py   # LLM Agent 自由模式 Demo —— 本地搜索页（LLMPlanner）
 │   ├── llm_baidu_demo.py   # LLM Agent 两阶段 Demo —— 真实百度（TaskPlanner）
 │   ├── check_llm_connectivity.py  # 7 家国内大模型连通性测试
-│   └── search_page.html    # 本地确定性搜索页（agent_demo 使用）
+│   ├── search_page.html    # 本地确定性搜索页（agent_demo 使用）
+│   └── ex_robot/ydgx/      # 业务示例（LLM 局部辅助：登录/跳转/菜单导航 + 多层 iframe + 失败回退，不入 git）
 │
-└── tests/                  # 15 个文件，321 个用例
+└── tests/                  # 16 个文件，300+ 个用例
     ├── test_action.py                    # Action Schema + 参数校验
     ├── test_observation.py               # Observation Schema
     ├── test_snapshot.py                  # Snapshot Schema + Generator 基础
@@ -129,6 +130,7 @@ agent-rpa/
     ├── test_planner.py                   # RuleBasedPlanner 规则引擎（8 条规则）
     ├── test_browser_tool.py              # BrowserTool（click 指纹 / wait / scroll 防护）
     ├── test_snapshot_generator.py        # SnapshotGenerator（selector 转义 / ID 生命周期）
+    ├── test_snapshot_frame.py            # SnapshotGenerator 多层 iframe 递归/消歧（真实 Chromium）
     ├── test_regression_fixed_issues.py   # 已修复问题回归
     ├── test_agent_integration.py         # Agent 主循环 Mock 集成（含 LLM 驱动/步骤模式）
     ├── test_llm_client.py                # LLMClient 协议 / Mock / 错误分类
@@ -255,6 +257,18 @@ Agent 每步 → _record_step() → HistoryMemory（滚动摘要 + 窗口）
     → plan_with_history / plan_step / reflect
 ```
 
+## V1.0 子计划 A 多层 iframe（已完成）
+
+真实 SAP 报表场景页面元素位于多层 iframe 内，V0.x 的 `Page.locator()` 看不到也无法操作。子计划 A 打通 iframe 的发现、定位与执行：
+
+- **数据模型** — `ElementInfo` 新增 `frame_path: tuple[str, ...]`（空元组=主页面，保持旧调用兼容）；`element_id` 跨 frame 全局唯一。
+- **递归 Snapshot** — `SnapshotGenerator` 递归遍历 iframe 树（`_iter_scopes` / `_walk_scopes` / `_frame_segments`）；iframe 定位段优先级 id → name → 父内位置 `nth=j`，重复 id/name 一律用位置索引消歧；子 frame 加载有有限超时等待（`asyncio.wait_for` 兜底），超时只跳过该帧。
+- **执行可达** — `Executor` 构建 `element_id → frame_path` 映射并透传 `BrowserTool._locator`，逐层 `frame_locator(seg)` 穿透后再定位元素；`target_id` 命中时优先于注入的 `params["selector"]`。
+- **失效恢复** — frame 导航/重建后旧路径作废，需重新 `observe()` 解析 `target_id`；模型上下文不含 selector / frame_path（只暴露 `target_id`）。
+- **测试** — 真实 Playwright Chromium 三层 iframe fixture（`tests/test_snapshot_frame.py`），覆盖递归提取、frame_path 生成、重复 id 消歧、主页面零回归。
+
+**可点击文本识别（V1.0 子计划 A 增强）** — `p/span/div/li/td/label` 带交互属性（`onclick`/`gcode`/`data-source`/`data-id`/`data-code`/`data-action`、`role=link|button`）或 `cursor:pointer`（排除 `div`/`td` 布局容器）的文本元素并入 `buttons` 交互元素，每帧上限 50。解决 ERP 系统用 `div/span/p` 充当点击入口、Snapshot 只见文本而 LLM 无法点击的问题（如 ydgx 应用中心「集团统建应用」「财务共享」入口）。
+
 ## 快速开始
 
 ```bash
@@ -295,4 +309,4 @@ pytest
 | V0.3 | 接入 LLM：LLM Planner（LLMClient 抽象 + LLMPlanner + 安全序列化 + OpenAI Provider） | ✅ 完成 |
 | V0.4 | Reflection：错误恢复与重试（任务步骤队列 / 停滞检测 / 异常防护 / 失败重试 / LLM 重试 / 后退刷新恢复） | ✅ 完成 |
 | V0.5 | Memory：历史操作与上下文记忆（增量摘要 + 滑动窗口 + 上下文压缩） | ✅ 完成 |
-| V1.0 | 完整 Agentic RPA：登录/查询/下载/上传/Excel 处理 | 🎯 规划中 |
+| V1.0 | 完整 Agentic RPA：多层 iframe 操作基座（子计划 A）已完成；登录/查询/下载/上传/Excel 处理 | 🚧 子计划 A 完成，其余规划中 |

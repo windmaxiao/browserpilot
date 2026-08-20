@@ -16,10 +16,11 @@ browserpilot/
 │   │   ├── llm/            #     LLM 客户端层（V0.3）
 │   │   ├── prompts/        #     提示词模板（V0.3）
 │   │   └── tools/          #     (预留) 辅助工具
-│   ├── examples/           #     示例 Demo
+│   ├── examples/           #     示例 Demo（含 ex_robot/ydgx 业务示例，不入 git）
 │   └── tests/              #     单元测试
 │
 ├── Agentic_RPA_项目规划_V0.1.md  # 项目规划与架构文档
+├── V1.0开发计划（新）.md        # V1.0 开发计划（iframe 能力已完成，其余规划中）
 ├── LICENSE
 └── README.md               # ← 当前文件（项目入口）
 ```
@@ -72,7 +73,7 @@ python examples/baidu_demo.py
 python examples/llm_agent_demo.py
 python examples/llm_baidu_demo.py
 
-# 运行测试（15 个测试文件，321 个用例）
+# 运行测试（16 个测试文件，300+ 个用例）
 pytest
 ```
 
@@ -87,7 +88,7 @@ pytest
 | V0.3 | 接入 LLM：LLM Planner | ✅ 完成 |
 | V0.4 | Reflection：错误恢复与重试（失败重试 / Reflection / 后退刷新恢复 / LLM 重试） | ✅ 完成 |
 | V0.5 | Memory：历史操作与上下文记忆（增量摘要 + 滑动窗口 + 上下文压缩） | ✅ 完成 |
-| V1.0 | 完整 Agentic RPA：登录/查询/下载/上传/Excel 处理 | 🎯 规划中 |
+| V1.0 | 完整 Agentic RPA：多层 iframe 操作基座已完成；ydgx 业务示例登录/跳转/菜单导航已 LLM 局部辅助化（占位符注入 + 失败回退确定性） | 🚧 子计划 A 完成，其余规划中 |
 
 ## 授权
 
