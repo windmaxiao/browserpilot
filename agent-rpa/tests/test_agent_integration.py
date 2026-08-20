@@ -20,15 +20,16 @@ from agent.schema.snapshot import ElementInfo, Snapshot
 
 
 class _PlannerStub:
-    """记录 plan_with_history 调用并依次返回预设 Action 的桩 Planner。"""
+    """记录 plan_batch 调用并依次返回预设 Action 的桩 Planner。"""
 
     def __init__(self, actions=None):
         self._actions = list(actions) if actions else []
         self.calls: list[dict] = []
 
-    async def plan_with_history(self, snapshot, goal, history):
+    async def plan_batch(self, snapshot, goal, history):
         self.calls.append({"goal": goal, "history_len": len(history)})
-        return self._actions.pop(0) if self._actions else None
+        action = self._actions.pop(0) if self._actions else None
+        return [action] if action is not None else None
 
 
 def make_mocks(actions=None):
@@ -772,3 +773,42 @@ async def test_agent_notifies_planner_on_final_reflect_action():
     final_action, final_obs = planner.results[0]
     assert final_action.action == "refresh"  # 最终执行的是替代动作
     assert final_obs.success is True
+
+
+# ── V1.0 批量增强：重复动作检测（同 target 相同动作 + 页面无变化 → 跳过） ──
+
+@pytest.mark.asyncio
+async def test_repeat_action_detection_skips_duplicate():
+    """LLM 连续对同一 target 输出相同动作且页面无变化 → 第二次被跳过不再执行"""
+    agent, planner, tool = make_mocks([
+        Action(action="input", target_id="e0", value="admin",
+               params={"selector": "#user"}),
+        Action(action="input", target_id="e0", value="admin",
+               params={"selector": "#user"}),
+        done(),
+    ])
+    tool.input = AsyncMock(return_value=Observation.ok())  # 页面无变化
+
+    obs = await agent.run("登录")
+
+    assert obs.success is True
+    assert tool.input.await_count == 1   # 重复动作被跳过，只真正执行一次
+    skipped = [e for e in agent.history
+               if e["observation"].is_error and "重复" in (e["observation"].error or "")]
+    assert len(skipped) == 1             # 跳过记录写入 history 供 LLM 感知
+
+
+@pytest.mark.asyncio
+async def test_repeat_action_detection_resets_after_page_change():
+    """页面变化后重复基准清空 → 相同动作不再误判为重复"""
+    agent, planner, tool = make_mocks([
+        Action(action="click", target_id="e1", params={"selector": "#a"}),
+        Action(action="click", target_id="e1", params={"selector": "#a"}),
+        done(),
+    ])
+    tool.click = AsyncMock(return_value=Observation.ok(page_changed=True))
+
+    obs = await agent.run("点击")
+
+    assert obs.success is True
+    assert tool.click.await_count == 2   # 每次点击都改变页面，不触发重复检测

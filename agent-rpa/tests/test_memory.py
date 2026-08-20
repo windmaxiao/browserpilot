@@ -203,9 +203,10 @@ class TestAgentMemoryIntegration:
                 self._actions = list(actions)
                 self.histories: list[list] = []
 
-            async def plan_with_history(self, snapshot, goal, history):
+            async def plan_batch(self, snapshot, goal, history):
                 self.histories.append(list(history))
-                return self._actions.pop(0) if self._actions else None
+                action = self._actions.pop(0) if self._actions else None
+                return [action] if action is not None else None
 
         planner = _RecordingPlanner(actions)
 

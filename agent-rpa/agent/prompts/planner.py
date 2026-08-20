@@ -244,26 +244,83 @@ def build_action_schema() -> dict:
     """
     return {
         "type": "object",
-        "properties": {
-            "action": {"type": "string", "enum": sorted(VALID_ACTIONS)},
-            "target_id": {
-                "type": "string",
-                "description": "当前 Snapshot 中的元素 ID，如 e1",
-            },
-            "target": {"type": ["string", "null"]},
-            "value": {"type": ["string", "null"]},
-            "params": {
-                "type": "object",
-                "description": "动作参数（selector 由本地注入，模型不得提供）",
-            },
-            "reason": {
-                "type": "string",
-                "description": "决策理由，仅用于日志，不参与执行",
-            },
-        },
+        "properties": _ACTION_PROPERTIES,
         "required": ["action"],
         "additionalProperties": False,
     }
+
+
+# 单个 Action 的属性（供单动作与批量 schema 复用）
+_ACTION_PROPERTIES = {
+    "action": {"type": "string", "enum": sorted(VALID_ACTIONS)},
+    "target_id": {
+        "type": "string",
+        "description": "当前 Snapshot 中的元素 ID，如 e1",
+    },
+    "target": {"type": ["string", "null"]},
+    "value": {"type": ["string", "null"]},
+    "params": {
+        "type": "object",
+        "description": "动作参数（selector 由本地注入，模型不得提供）",
+    },
+    "reason": {
+        "type": "string",
+        "description": "决策理由，仅用于日志，不参与执行",
+    },
+}
+
+_BATCH_MAX_ACTIONS = 10
+
+
+def build_hybrid_schema() -> dict:
+    """混合输出 schema：允许模型选择单动作或批量动作（V1.0 批量增强 hybrid）。
+
+    - 单个动作：``{"action": "...", "target_id": "e1", ...}``（导航等每步动作改变页面，默认输出单动作）
+    - 批量动作：``{"actions": [动作1, 动作2, ...]}``（表单填写等同一页面连续操作，批量一次输出）
+
+    LLM 自主选择，导航场景保持原来单动作轻量输出不变慢，表单场景受益批量。
+    """
+    return {
+        "anyOf": [
+            # 方案一：单动作（默认，导航、页面跳转等场景用）
+            {
+                "type": "object",
+                "properties": _ACTION_PROPERTIES,
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+            # 方案二：批量动作（同一页面不改变结构的连续操作用）
+            {
+                "type": "object",
+                "properties": {
+                    "actions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": _ACTION_PROPERTIES,
+                            "required": ["action"],
+                            "additionalProperties": False,
+                        },
+                        "minItems": 1,
+                        "maxItems": _BATCH_MAX_ACTIONS,
+                    },
+                },
+                "required": ["actions"],
+                "additionalProperties": False,
+            },
+        ],
+    }
+
+
+BATCH_INSTRUCTION = (
+    "批量优化：同一页面的连续操作（如填写多个输入框），推荐一次输出最多 "
+    + str(_BATCH_MAX_ACTIONS)
+    + " 个动作（显著减少调用次数）；若动作会跳转/改变页面，默认输出单个动作即可。\n"
+    "规则：\n"
+    "- 连续填 input/select 优先用批量：输出 {\"actions\": [ {动作1}, {动作2}, ... ]}\n"
+    "- 导航/点击跳转输出单个动作即可：直接 {\"action\": \"click\", ...}\n"
+    "- 所有批量动作都基于当前同一 Snapshot，按执行顺序排列，每个动作独立引用 target_id"
+)
 
 
 def build_user_prompt(
@@ -361,3 +418,36 @@ def parse_action_dict(
     if errors:
         raise ActionParseError("Action 校验失败: " + "; ".join(errors))
     return action
+
+
+def parse_action_list(data: Any, snapshot: Snapshot) -> list[Action]:
+    """将模型输出的混合 dict 转换为已验证的 Action 列表（V1.0 批量增强 hybrid）。
+
+    兼容两种输出（build_hybrid_schema 的 anyOf）：
+    - ``{"actions": [...]}``：批量，逐条 parse_action_dict 安全转换，单条非法跳过，全非法抛错
+    - 单个动作 dict（``{"action": "...", ...}``）：直接转换为单元素列表
+
+    非法 target_id（幻觉）会抛 ActionParseError。
+    """
+    if not isinstance(data, dict):
+        raise ActionParseError(
+            f"批量输出必须是 JSON 对象，收到 {type(data).__name__}"
+        )
+
+    # anyOf 方案二：批量动作
+    if "actions" in data:
+        actions = data.get("actions")
+        if not isinstance(actions, list) or not actions:
+            raise ActionParseError("批量输出缺少非空 actions 数组")
+        parsed: list[Action] = []
+        for item in actions:
+            try:
+                parsed.append(parse_action_dict(item, snapshot))
+            except ActionParseError:
+                continue
+        if not parsed:
+            raise ActionParseError("批量输出中没有任何合法动作")
+        return parsed
+
+    # anyOf 方案一：单个动作
+    return [parse_action_dict(data, snapshot)]

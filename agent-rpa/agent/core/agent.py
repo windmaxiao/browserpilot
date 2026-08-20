@@ -28,6 +28,9 @@ from agent.schema.action import Action, done
 from agent.schema.observation import Observation
 from agent.schema.snapshot import Snapshot
 
+# 重复动作检测（V1.0 批量增强）：连续 N 次对同一目标执行相同动作且页面无变化 → 判停滞
+_MAX_REPEAT_SKIPS = 3
+
 
 class Agent:
     """
@@ -111,92 +114,155 @@ class Agent:
         return await self._run_free(goal)
 
     async def _run_free(self, goal: str) -> Observation:
-        """自由模式：单目标循环，LLM 自主决策直到输出 done（旧 V0.3 行为）。"""
+        """自由模式：单目标循环，LLM 自主决策直到输出 done。
+
+        V1.0 批量增强：每轮 observe 一次、批量规划一次（plan_batch），
+        返回的多个动作在同一 Snapshot 上连续执行（表单填写从 N 次 LLM 降为 1 次）；
+        任一动作失败、导致页面变化或遇到 done 时结束本批，回到主循环重新观察。
+        """
         # 循环检测（V0.4 前瞻）：连续无效果等待计数
         consecutive_waits = 0
+        # 重复动作检测（V1.0 批量增强）：上一步指纹 + 页面是否变化 + 连续跳过计数
+        last_fp: Optional[tuple] = None
+        last_changed = True
+        repeat_skips = 0
 
         logger.info("🧠 Agent 启动（自由模式）| 目标: {}", goal)
 
         while self._current_step < self._max_steps:
-            self._current_step += 1
-
-            # 1. Observe
-            logger.info("📷 [Step {}/{}] 观察页面...", self._current_step, self._max_steps)
+            # 1. Observe（每批一次）
+            logger.info("📷 [Step {}/{}] 观察页面...", self._current_step + 1, self._max_steps)
             snapshot = await self._safe_observe()
             if snapshot is None:
                 return Observation.fail(
-                    error=f"在第 {self._current_step} 步观察页面失败（浏览器可能已关闭）",
+                    error=f"在第 {self._current_step + 1} 步观察页面失败（浏览器可能已关闭）",
                 )
             self._log_snapshot(snapshot)
 
-            # 2. Plan
-            logger.info("📝 [Step {}/{}] 规划动作...", self._current_step, self._max_steps)
-            # V0.3 起通过 plan_with_history 传入有限历史；
-            # V0.5 起传入记忆压缩上下文（摘要 + 最近窗口，基类默认忽略历史转发 plan）
-            action = await self._planner.plan_with_history(
+            # 2. Plan batch（每批一次 LLM，可返回多个连续动作）
+            logger.info("📝 [Step {}/{}] 规划动作...", self._current_step + 1, self._max_steps)
+            actions = await self._planner.plan_batch(
                 snapshot, goal, self._memory.context_entries(),
             )
-
-            if action is None:
-                logger.warning("⚠️  [Step {}] 无法规划出有效动作", self._current_step)
+            if not actions:
+                logger.warning("⚠️  无法规划出有效动作")
                 return Observation.fail(
-                    error=f"在第 {self._current_step} 步无法规划出有效动作",
+                    error=f"在第 {self._current_step + 1} 步无法规划出有效动作",
                     url=snapshot.url,
                 )
 
-            # 3. Check done
-            if action.action == "done":
-                logger.info("✅ Agent 完成任务: {}", action.value or goal)
-                return Observation.ok(
-                    url=snapshot.url,
-                    title=snapshot.title,
-                    data={"done": True, "message": action.value or "任务完成"},
+            # 3. 批量执行（同一 Snapshot，逐动作执行/记录）
+            failed_obs: Optional[Observation] = None
+            for action in actions:
+                self._current_step += 1
+                step = self._current_step
+
+                # 3.0 Check done
+                if action.action == "done":
+                    logger.info("✅ Agent 完成任务: {}", action.value or goal)
+                    return Observation.ok(
+                        url=snapshot.url,
+                        title=snapshot.title,
+                        data={"done": True, "message": action.value or "任务完成"},
+                    )
+
+                # 3.0a 重复动作检测：页面未变化时连续对同一目标执行相同动作 → 跳过
+                # 防止 LLM 在输入框填完值后仍反复填同一字段（如登录连续 4 次填用户名）
+                skip_action = False
+                if (
+                    not last_changed
+                    and last_fp is not None
+                    and action.action in ("input", "click", "select", "scroll")
+                ):
+                    current_fp = (action.action, action.target_id)
+                    if current_fp == last_fp:
+                        repeat_skips += 1
+                        logger.warning(
+                            "⏭️ [Step {}] 跳过重复动作: {}[{}]（页面未变化，连续跳过 {}/{}）",
+                            step, action.action, action.target_id,
+                            repeat_skips, _MAX_REPEAT_SKIPS,
+                        )
+                        if repeat_skips >= _MAX_REPEAT_SKIPS:
+                            logger.warning(
+                                "❌ [Step {}] 连续 {} 次重复动作被跳过，任务停滞",
+                                step, _MAX_REPEAT_SKIPS,
+                            )
+                            return Observation.fail(
+                                error=f"重复动作停滞：连续 {_MAX_REPEAT_SKIPS} 次对同一目标执行相同动作且页面无变化",
+                                url=snapshot.url,
+                            )
+                        skip_action = True
+                    else:
+                        repeat_skips = 0
+                else:
+                    repeat_skips = 0
+                if skip_action:
+                    await self._record_step(
+                        step, action,
+                        Observation.fail(
+                            error=f"重复动作被跳过（连续 {repeat_skips} 次对同一目标执行相同动作且页面无变化），请勿重复该动作",
+                        ),
+                    )
+                    continue
+
+                # 3.1 Execute（失败自动重试：机械 1 次 → Reflection 1 次）
+                self._log_action(action, step)
+                observation, final_action = await self._execute_action_with_retry(
+                    action, snapshot, step=step,
                 )
+                if observation is None:
+                    return Observation.fail(
+                        error=f"在第 {step} 步动作执行异常（浏览器可能已关闭）",
+                    )
 
-            # 4. Execute（失败自动重试：机械 1 次 → Reflection 1 次）
-            self._log_action(action, self._current_step)
-            observation, final_action = await self._execute_action_with_retry(
-                action, snapshot, step=self._current_step,
-            )
-            if observation is None:
-                return Observation.fail(
-                    error=f"在第 {self._current_step} 步动作执行异常（浏览器可能已关闭）",
-                )
+                # 3.2 Record history（V0.5 起同步写入记忆，供上下文压缩）
+                await self._record_step(step, final_action, observation)
+                self._notify_planner_result(final_action, observation)
 
-            # 5. Record history（V0.5 起同步写入记忆，供上下文压缩）
-            await self._record_step(self._current_step, final_action, observation)
+                # 3.3 Check failure（重试与 Reflection 均失败 → 中断本批走页面恢复）
+                if observation.is_error:
+                    logger.warning("❌ [Step {}] 动作失败（已重试）: {}", step, observation.error)
+                    failed_obs = observation
+                    break
 
-            # 5.5 反馈执行结果给 Planner（失败时回滚乐观状态，待解决问题 #1）
-            self._notify_planner_result(final_action, observation)
+                # 3.4 循环检测：连续等待且页面无变化 → 任务停滞，提前终止
+                if final_action.action == "wait" and not observation.page_changed:
+                    consecutive_waits += 1
+                else:
+                    consecutive_waits = 0
+                if consecutive_waits >= 2:
+                    logger.warning(
+                        "⚠️ [Step {}] 连续 {} 次等待且页面无变化，判定任务停滞",
+                        step, consecutive_waits,
+                    )
+                    return Observation.fail(
+                        error="任务停滞：连续等待且页面无变化",
+                        url=snapshot.url,
+                    )
 
-            # 6. Check failure（重试与 Reflection 均失败 → 尝试页面恢复，仍失败则中止）
-            if observation.is_error:
-                logger.warning("❌ [Step {}] 动作失败（已重试）: {}", self._current_step, observation.error)
+                # 3.5 页面已变化 → 结束本批（旧 target_id 可能失效），并清空重复基准
+                if observation.page_changed:
+                    logger.info("📄 [Step {}] 页面已变化，结束本批，重新观察", step)
+                    last_fp = None
+                    last_changed = True
+                    break
+
+                # 3.6 更新重复检测基准（仅记录"页面未变化"的最近一次成功动作）
+                last_fp = (final_action.action, final_action.target_id)
+                last_changed = observation.page_changed
+
+                logger.info("✅ [Step {}] 成功 | URL: {}", step, observation.url)
+
+            # 4. 批量中某动作失败 → 尝试页面恢复，仍失败则中止
+            if failed_obs is not None:
                 if self._recovery_count < self._max_recoveries and await self._recover_page():
                     self._recovery_count += 1
                     logger.info(
-                        "🔄 [Step {}] 页面已恢复，重新规划（恢复 {}/{}）",
-                        self._current_step, self._recovery_count, self._max_recoveries,
+                        "🔄 页面已恢复，重新规划（恢复 {}/{}）",
+                        self._recovery_count, self._max_recoveries,
                     )
                     continue
-                return observation
-
-            # 7. 循环检测：连续等待且页面无变化 → 任务停滞，提前终止
-            if final_action.action == "wait" and not observation.page_changed:
-                consecutive_waits += 1
-            else:
-                consecutive_waits = 0
-            if consecutive_waits >= 2:
-                logger.warning(
-                    "⚠️ [Step {}] 连续 {} 次等待且页面无变化，判定任务停滞",
-                    self._current_step, consecutive_waits,
-                )
-                return Observation.fail(
-                    error="任务停滞：连续等待且页面无变化",
-                    url=snapshot.url,
-                )
-
-            logger.info("✅ [Step {}] 成功 | URL: {}", self._current_step, observation.url)
+                return failed_obs
 
         # 超出最大步数
         logger.warning("⚠️  超出最大步数限制 ({})", self._max_steps)

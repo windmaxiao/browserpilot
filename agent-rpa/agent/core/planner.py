@@ -23,11 +23,14 @@ from loguru import logger
 
 from agent.llm.base import LLMClient, LLMError, LLMRetryableError
 from agent.prompts.planner import (
+    BATCH_INSTRUCTION,
     SYSTEM_PROMPT,
     ActionParseError,
     build_action_schema,
+    build_hybrid_schema,
     build_user_prompt,
     parse_action_dict,
+    parse_action_list,
     serialize_history,
     serialize_snapshot,
 )
@@ -121,6 +124,17 @@ class Planner:
         self, snapshot: Snapshot, goal: str, history: list
     ) -> Optional[Action]:
         return await self.plan(snapshot, goal)
+
+    async def plan_batch(
+        self, snapshot: Snapshot, goal: str, history: list
+    ) -> Optional[list[Action]]:
+        """批量规划默认实现：退化为单动作（V1.0 批量增强）。
+
+        所有规划器兼容 Agent 的批量主循环；支持批量输出的规划器
+        （LLMPlanner）覆盖本方法返回多个连续动作。
+        """
+        action = await self.plan_with_history(snapshot, goal, history)
+        return [action] if action is not None else None
 
     async def decompose(self, goal: str) -> Optional[list["TaskStep"]]:
         """将目标拆解为步骤队列（V0.4 前瞻）。
@@ -547,6 +561,46 @@ class LLMPlanner(Planner):
 
     async def plan(self, snapshot: Snapshot, goal: str) -> Optional[Action]:
         return await self.plan_with_history(snapshot, goal, [])
+
+    async def plan_batch(
+        self, snapshot: Snapshot, goal: str, history: list
+    ) -> Optional[list[Action]]:
+        """批量规划：一次返回多个连续动作（V1.0 批量增强 hybrid）。
+
+        用于表单填写等同一页面内的连续操作，减少 observe / LLM 调用次数
+        （N 个字段 N 次 LLM → 1 次）。hybrid schema 允许模型二选一：
+        单个动作（导航/跳转场景，保持轻量）或 ``{"actions": [...]}`` 批量
+        （同一页面连续操作）；逐条安全转换，单条非法自动跳过，全部非法视为失败。
+        """
+        view = serialize_snapshot(snapshot)
+        schema = build_hybrid_schema()
+        base = build_user_prompt(
+            goal, view, serialize_history(history), constraints=self._constraints
+        )
+        user_prompt = f"{base}\n\n{BATCH_INSTRUCTION}"
+        raw = await self._call_llm_with_retry(
+            system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt, schema=schema,
+        )
+        if raw is None:
+            return None
+        for attempt in range(self._max_repair_attempts + 1):
+            try:
+                actions = parse_action_list(raw, snapshot)
+                return actions or None
+            except ActionParseError as e:
+                logger.warning(
+                    "批量 Action 解析失败（第 {}/{} 次）: {}",
+                    attempt + 1, self._max_repair_attempts + 1, e,
+                )
+                if attempt >= self._max_repair_attempts:
+                    return None
+                user_prompt = self._build_repair_prompt(user_prompt, raw, str(e))
+                raw = await self._call_llm_with_retry(
+                    system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt, schema=schema,
+                )
+                if raw is None:
+                    return None
+        return None
 
     async def plan_with_history(
         self, snapshot: Snapshot, goal: str, history: list

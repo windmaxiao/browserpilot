@@ -7,6 +7,7 @@ LLM Planner 解析测试（V0.3 阶段 C）
 - 幻觉 ID、伪造 selector、非法 action、数组输出等不会产生可用 Action
 - 不需要元素的动作无需 target_id
 - 系统 / 用户提示词构建
+- 批量规划（V1.0）：一次输出多个连续动作，逐条安全转换
 """
 
 import pytest
@@ -17,8 +18,10 @@ from agent.prompts.planner import (
     SYSTEM_PROMPT,
     ActionParseError,
     build_action_schema,
+    build_hybrid_schema,
     build_user_prompt,
     parse_action_dict,
+    parse_action_list,
 )
 from agent.schema.action import VALID_ACTIONS, Action
 from agent.schema.snapshot import ElementInfo, Snapshot
@@ -340,3 +343,107 @@ class TestLLMPlanner:
         prompt = client.calls[0].user_prompt
         assert "click" in prompt
         assert "https://x.com/page" in prompt
+
+
+class TestPlanBatch:
+    """批量规划（V1.0 批量增强 hybrid）：一次 LLM 调用返回多个连续动作"""
+
+    def test_build_hybrid_schema_shape(self):
+        schema = build_hybrid_schema()
+        assert "anyOf" in schema and len(schema["anyOf"]) == 2
+        single, batch = schema["anyOf"]
+        assert single["required"] == ["action"]
+        assert batch["required"] == ["actions"]
+        assert batch["properties"]["actions"]["type"] == "array"
+        assert batch["properties"]["actions"]["maxItems"] == 10
+
+    def test_parse_action_list_batch(self):
+        actions = parse_action_list(
+            {"actions": [
+                {"action": "input", "target_id": "e0", "value": "admin"},
+                {"action": "click", "target_id": "e1"},
+            ]},
+            _snapshot(),
+        )
+        assert len(actions) == 2
+        assert actions[0].action == "input"
+        assert actions[0].value == "admin"
+        assert actions[1].action == "click"
+        assert actions[1].params["selector"] == "#btn-login"
+
+    def test_parse_action_list_single(self):
+        """anyOf 单动作分支：直接输出 action dict 也能解析"""
+        actions = parse_action_list(
+            {"action": "click", "target_id": "e1"}, _snapshot(),
+        )
+        assert len(actions) == 1
+        assert actions[0].action == "click"
+        assert actions[0].params["selector"] == "#btn-login"
+
+    def test_parse_action_list_skips_invalid_item(self):
+        """批量中单条非法（幻觉 ID）跳过，保留合法条目"""
+        actions = parse_action_list(
+            {"actions": [
+                {"action": "click", "target_id": "e99"},
+                {"action": "click", "target_id": "e1"},
+            ]},
+            _snapshot(),
+        )
+        assert len(actions) == 1
+        assert actions[0].target_id == "e1"
+
+    def test_parse_action_list_all_invalid_raises(self):
+        with pytest.raises(ActionParseError):
+            parse_action_list(
+                {"actions": [{"action": "click", "target_id": "e99"}]}, _snapshot(),
+            )
+
+    def test_parse_action_list_single_invalid_raises(self):
+        with pytest.raises(ActionParseError):
+            parse_action_list({"action": "click", "target_id": "e99"}, _snapshot())
+
+    async def test_plan_batch_returns_multiple_actions(self):
+        client = MockLLMClient([{"actions": [
+            {"action": "input", "target_id": "e0", "value": "admin"},
+            {"action": "click", "target_id": "e1"},
+        ]}])
+        planner = LLMPlanner(client, model="mock", timeout=1000)
+        actions = await planner.plan_batch(_snapshot(), "登录", [])
+        assert actions is not None and len(actions) == 2
+        assert actions[0].action == "input" and actions[0].value == "admin"
+        assert actions[1].action == "click"
+        assert actions[1].params["selector"] == "#btn-login"
+        # 批量提示词包含批量说明
+        assert "批量优化" in client.calls[0].user_prompt
+
+    async def test_plan_batch_single_action_output(self):
+        """模型选择单动作输出（导航场景）也能正常解析"""
+        client = MockLLMClient([{"action": "click", "target_id": "e1"}])
+        planner = LLMPlanner(client, model="mock", timeout=1000)
+        actions = await planner.plan_batch(_snapshot(), "点击", [])
+        assert actions is not None and len(actions) == 1
+        assert actions[0].action == "click"
+        assert actions[0].params["selector"] == "#btn-login"
+
+    async def test_plan_batch_single_done(self):
+        client = MockLLMClient([{"actions": [{"action": "done"}]}])
+        planner = LLMPlanner(client, model="mock", timeout=1000)
+        actions = await planner.plan_batch(_snapshot(), "结束", [])
+        assert actions is not None and len(actions) == 1
+        assert actions[0].action == "done"
+
+    async def test_plan_batch_all_invalid_returns_none(self):
+        client = MockLLMClient([{"actions": [{"action": "click", "target_id": "e99"}]}])
+        planner = LLMPlanner(client, model="mock", timeout=1000)
+        assert await planner.plan_batch(_snapshot(), "点击", []) is None
+
+    async def test_base_planner_batch_falls_back_to_single(self):
+        """基类 plan_batch 退化为单动作，兼容规则规划器等"""
+        class _P(Planner):
+            async def plan(self, snapshot, goal):
+                return Action(action="click", target_id="e1",
+                              params={"selector": "#btn-login"})
+        p = _P()
+        actions = await p.plan_batch(_snapshot(), "点击", [])
+        assert actions is not None and len(actions) == 1
+        assert actions[0].action == "click"
