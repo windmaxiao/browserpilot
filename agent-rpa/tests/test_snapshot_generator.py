@@ -28,11 +28,29 @@ def make_el(tag="button", text="", attributes=None):
 
 
 def make_page(*element_groups):
-    """构造 query_selector_all 按序返回各分组元素的 Page Mock"""
+    """构造 query_selector_all 按序返回各分组元素的 Page Mock。
+
+    逐元素路径调用顺序：buttons → clickables → inputs → links → texts → selects。
+    clickables 查询（#16 新增）在单元测试中恒返回空（真实行为由
+    test_snapshot_frame.py 覆盖），调用方沿用旧语义按 5 类分组即可。
+    """
+    groups = list(element_groups)
+    index = 0
+
+    async def _qsa(selector):
+        nonlocal index
+        if selector == SnapshotGenerator.SELECTOR_CLICKABLE_ALONE:
+            return []
+        if index < len(groups):
+            result = groups[index]
+            index += 1
+            return result
+        return []
+
     page = AsyncMock()
     page.title = AsyncMock(return_value="测试页")
     page.url = "https://example.com"
-    page.query_selector_all = AsyncMock(side_effect=list(element_groups))
+    page.query_selector_all = _qsa
     return page
 
 
@@ -180,3 +198,23 @@ async def test_generate_returns_empty_snapshot_when_page_closed():
     assert snap.url == ""
     assert snap.loading is True
     assert snap.is_empty()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 纯图标按钮保留（待解决问题 #24）
+# ═══════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_icon_button_kept_with_placeholder():
+    """无文本/aria-label 的纯图标按钮以「图标按钮#序号」占位保留（#24）"""
+    btn = make_el(tag="button", text="")
+    page = make_page(
+        [btn],  # buttons
+        [], [], [], [],  # clickables / inputs / links / texts / selects
+    )
+    sg = SnapshotGenerator(page)
+
+    snapshot = await sg.generate()
+
+    assert len(snapshot.buttons) == 1
+    assert snapshot.buttons[0].text == "图标按钮#1"

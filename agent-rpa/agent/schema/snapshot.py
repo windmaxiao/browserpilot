@@ -28,7 +28,7 @@ class ElementInfo:
     """HTML 标签名，如 button、a、input"""
 
     element_type: str = ""
-    """元素类型，如 button、link、textbox、dropdown"""
+    """元素类型，如 button、link、textbox、dropdown、checkbox、radio（#25）"""
 
     selector: str = ""
     """Playwright 选择器（供内部执行使用）"""

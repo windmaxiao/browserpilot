@@ -44,7 +44,9 @@ def _el(
 
 
 def _snapshot(*, url: str = "https://example.com/login", title: str = "登录",
-              page_type: str = "login", elements: list[ElementInfo] | None = None) -> Snapshot:
+              page_type: str = "login", elements: list[ElementInfo] | None = None,
+              links: list[ElementInfo] | None = None,
+              selects: list[ElementInfo] | None = None) -> Snapshot:
     els = elements or []
     return Snapshot(
         title=title,
@@ -52,7 +54,8 @@ def _snapshot(*, url: str = "https://example.com/login", title: str = "登录",
         page_type=page_type,
         buttons=[e for e in els if e.element_type == "button"],
         inputs=[e for e in els if e.element_type == "textbox"],
-        links=[e for e in els if e.element_type == "link"],
+        links=links if links is not None else [e for e in els if e.element_type == "link"],
+        selects=selects or [],
     )
 
 
@@ -99,6 +102,20 @@ class TestSerializeSnapshot:
         els = [_el("e0"), _el("e1")]
         data = serialize_snapshot(_snapshot(elements=els), max_elements=5)
         assert "elements_truncated" not in data
+
+    def test_truncation_reserves_slots_for_each_category(self):
+        """#21：buttons 占满配额时，links/selects 仍按类别配额保留"""
+        buttons = [_el(f"b{i}", element_type="button", text=f"按钮{i}")
+                   for i in range(10)]
+        links = [_el("l0", element_type="link", text="结果链接")]
+        selects = [_el("s0", element_type="select", tag="select", text="选项")]
+        snap = _snapshot(links=links, selects=selects, elements=buttons)
+        data = serialize_snapshot(snap, max_elements=4)
+        ids = [el["id"] for el in data["elements"]]
+        # max_elements=4：每类 1 个保底 → b0 / l0 / s0 均保留
+        assert "b0" in ids and "l0" in ids and "s0" in ids
+        assert len(data["elements"]) == 4
+        assert data["elements_truncated"] is True
 
     def test_text_truncation_marked(self):
         el = _el("e0", text="a" * 50)

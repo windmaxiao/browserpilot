@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, get_args
 
 
 # ── 支持的原子动作类型 ──────────────────────────────────────────────
@@ -29,11 +29,8 @@ ActionType = Literal[
     "done",        # 任务完成
 ]
 
-VALID_ACTIONS = frozenset({
-    "click", "input", "select", "goto", "scroll",
-    "wait", "download", "upload", "back", "refresh",
-    "screenshot", "done",
-})
+# 由 ActionType 派生，避免双份维护（待解决问题 #25）
+VALID_ACTIONS = frozenset(get_args(ActionType))
 
 # 需要目标元素定位的动作：target / target_id / params["selector"] 三选一
 NEEDS_TARGET = frozenset({"click", "select", "download", "upload", "input"})

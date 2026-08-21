@@ -465,7 +465,7 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 - ✅ **两阶段任务队列（V0.4 前瞻）**：`TaskPlanner`（`decompose` 拆解目标为步骤队列 + `plan_step` 分步决策）、`TaskStep/TaskQueue`、Agent 双模式（步骤模式/自由模式自动回退）、wait/verify 步骤由框架直接执行（不经过 LLM）、队列耗尽即完成
 - ✅ **异常防护（V0.4 前瞻）**：`_safe_observe()` / `_safe_execute()` 浏览器关闭时优雅失败；停滞检测（LLM 连续 2 次 wait 且页面无变化提前终止）
 - ✅ **Reflection 重试（V0.4）**：Agent 执行失败混合重试（机械 1 次 → `Planner.reflect()` 失败反思给出替代动作 1 次 → 仍失败尝试页面恢复 → 中止）；LLM 可重试错误（超时/限流/网络）指数退避自动重试并封顶（默认 5 次、基础间隔 2s、封顶 16s，`LLMPlanner(llm_retries/llm_retry_delay/llm_retry_max_delay)` 可覆盖）；等待步骤框架兜底（拆解误拆 action 时按描述自动纠正为 wait 并提取毫秒）；**后退/刷新恢复**（失败后自动 back/refresh 重置页面状态再重新规划，默认最多 2 次）
-- ✅ **工程化增强**：`setup_logging`（控制台 + `logs/` 按天滚动文件）、Snapshot 生成并行化提速（asyncio.gather 双层并发）、新标签页轮询跟随、`.env` 零依赖加载链
+- ✅ **工程化增强**：`setup_logging`（控制台 + `logs/` 按天滚动文件）、Snapshot 批量 JS 提取提速（每帧 1 次 evaluate 替代逐元素 CDP 往返；Mock 逐元素回退路径属性并发取回，帧间仍串行遍历）、新标签页轮询跟随、`.env` 零依赖加载链
 - ✅ **Snapshot 批量 JS 提取（V1.0 前性能优化）**：把逐元素约 15 次 CDP 调用合并为每帧 1 次 `frame.evaluate`（`_EXTRACT_JS` + `_extract_scope` + `_from_raw`），解决大页面（如 SAP 多层 iframe）Snapshot 生成 500s+ 的问题（详见 [待解决问题.md](待解决问题.md) #9）；真实 Page/Frame 走批量路径，Mock 自动回退逐元素路径保持测试兼容
 - ✅ **iframe 支持（V1.0 子计划 A）**：`ElementInfo` 新增 `frame_path`（元组，空为主页面）；`SnapshotGenerator` 递归遍历多层 iframe（`_iter_scopes`/`_walk_scopes`/`_frame_segments`，重复 id/name 用位置 `nth=j` 消歧，子 frame 加载有限超时跳过）；`Executor` 构建 `element_id → frame_path` 映射（target_id 优先于注入 selector）；`BrowserTool._locator` 逐层 `frame_locator` 穿透；frame 失效后重新 Observe 再解析；真实 Playwright 浏览器三层 iframe fixture 测试（`test_snapshot_frame.py`）
 - ✅ **Memory（V0.5）**：`HistoryMemory` 增量式历史记忆（滚动摘要：超出窗口的旧条目按批折叠，默认 `window=5, batch=10`，可注入异步 LLM 摘要器）、`summarize_entries()` 规则式摘要（不含输入值/URL 等敏感内容）、上下文压缩（`context_entries()` = 摘要 + 最近窗口，摘要不占窗口名额）、`serialize_history` / `build_user_prompt` 摘要协议、Agent `_record_step()` 同步记录 + `plan_with_history` / `plan_step` / `reflect` 传压缩上下文
@@ -477,12 +477,9 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 | # | 问题 | 优先级 | 状态 |
 |---|------|--------|------|
 | 3 | texts 含 span 噪音 | 🟡 | 暂不处理 |
-| 6 | Provider 预设模型名硬编码，需与官方清单核对 | 🟢 | ⏳ 待解决 |
-| 7 | 步骤模式 wait 步骤失败直接中止，无重试/恢复 | 🟢 | ⏳ 待解决 |
-| 8 | 手动 API step()/observe() 无异常防护 | 🟢 | ⏳ 待解决 |
-| 9 | Snapshot 逐元素 CDP 调用，大页面耗时 500s+ | 🔴 | 方案 1 已实现（批量 JS），方案 2/3 待定 |
+| 20 | 规则 7「点击首条结果」非死代码，设计取舍保留 | 🟡 | 🔒 保留 |
 
-> 完整列表见 [待解决问题.md](待解决问题.md)：当前跟踪 5 项，已解决条目随修复移除，编号不复用（#9 为后续增补）。
+> 完整列表见 [待解决问题.md](待解决问题.md)：当前跟踪 2 项（🟡 2），已解决条目随修复移除，编号不复用（#16-#25 为 2026-08 增补，其中 #10-#19/#21/#22/#24、#6、#7、#8、#23、#25 已修复，#20 确认保留）。
 
 ---
 

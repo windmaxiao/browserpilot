@@ -241,9 +241,7 @@ class TestIssue7And9_ObservationDataNoNesting:
         """executor._execute_done 生成的 Observation data 无嵌套"""
         mock_tool = MagicMock()
         mock_tool.current_url = "https://example.com"
-        async def mock_title():
-            return "页面标题"
-        type(mock_tool).current_title = PropertyMock(return_value=mock_title())
+        mock_tool.current_title = AsyncMock(return_value="页面标题")  # #19：方法而非 async property
 
         executor = Executor(mock_tool)
         action = Action(action="done", value="任务完成")

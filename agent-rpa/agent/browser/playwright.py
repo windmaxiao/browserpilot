@@ -67,8 +67,13 @@ class BrowserTool:
     def current_url(self) -> str:
         return self._page.url
 
-    @property
     async def current_title(self) -> str:
+        """当前页面标题（普通异步方法，非 property，待解决问题 #19）。
+
+        调用方必须写 ``await tool.current_title()``；漏写括号时
+        ``await tool.current_title`` 会立即抛 TypeError，而非静默把
+        coroutine 塞进数据字段（旧 async property 的隐患）。
+        """
         return await self._page.title()
 
     # ── 核心操作 ────────────────────────────────────────────────────
@@ -80,11 +85,13 @@ class BrowserTool:
         try:
             await self._page.goto(url, timeout=timeout, wait_until="load")
             elapsed = time.time() - start
+            # title 只取一次（待解决问题 #25），避免日志与返回各发一次 CDP
+            title = await self._page.title()
             logger.info("✅ goto 完成 | URL: {} | title: {} | {:.1f}s",
-                        self._page.url, await self._page.title(), elapsed)
+                        self._page.url, title, elapsed)
             return Observation.ok(
                 url=self._page.url,
-                title=await self._page.title(),
+                title=title,
                 page_changed=True,
             )
         except Exception as e:
@@ -110,7 +117,7 @@ class BrowserTool:
         logger.info("🖱️ click: {}", selector)
         start = time.time()
         try:
-            locator = await self._locator(selector, frame_path)
+            locator = self._locator(selector, frame_path)
             await locator.wait_for(state="visible", timeout=timeout)
             old_url = self._page.url
             old_title = await self._page.title()
@@ -162,7 +169,7 @@ class BrowserTool:
         logger.info("⌨️ input: {} | text: {}", selector, text[:80])
         start = time.time()
         try:
-            locator = await self._locator(selector, frame_path)
+            locator = self._locator(selector, frame_path)
             await locator.wait_for(state="visible", timeout=timeout)
             if clear_first:
                 await locator.clear()
@@ -190,7 +197,7 @@ class BrowserTool:
         logger.info("📋 select: {} → {}", selector, value)
         start = time.time()
         try:
-            locator = await self._locator(selector, frame_path)
+            locator = self._locator(selector, frame_path)
             await locator.wait_for(state="visible", timeout=timeout)
             old_url = self._page.url
             old_title = await self._page.title()
@@ -291,7 +298,7 @@ class BrowserTool:
         start = time.time()
         try:
             async with self._page.expect_download(timeout=timeout) as download_info:
-                locator = await self._locator(selector, frame_path)
+                locator = self._locator(selector, frame_path)
                 await locator.click()
 
             download = await download_info.value
@@ -390,11 +397,12 @@ class BrowserTool:
 
     # ── 辅助方法 ────────────────────────────────────────────────────
 
-    async def _locator(self, selector: str, frame_path=()) :
+    def _locator(self, selector: str, frame_path=()):
         """按 (selector, frame_path) 解析最终 Locator（V1.0 子计划 A）。
 
         空 frame_path → 直接 `page.locator(selector)`（主页面，向后兼容）；
         非空 → 逐层 `frame_locator(seg)` 穿透 iframe，最后对目标 frame 定位元素。
+        frame_locator / locator 均为同步构建（#19 去除多余的 async）。
         """
         from playwright.async_api import Locator
         target: object = self._page
@@ -588,6 +596,22 @@ class BrowserManager:
         except Exception as e:
             elapsed = time.time() - start
             logger.error("❌ 浏览器启动失败 | {:.1f}s | 错误: {}", elapsed, e)
+            # 待解决问题 #17：逐项清理已启动的资源（page → context → browser →
+            # playwright 驱动），避免部分失败时浏览器进程与驱动连接泄漏。
+            for obj, name in (
+                (self._page, "页面"), (self._context, "context"),
+                (self._browser, "浏览器"),
+            ):
+                if obj is not None:
+                    try:
+                        await obj.close()
+                    except Exception as close_e:
+                        logger.warning("⚠️ 启动失败后关闭{}失败: {}", name, close_e)
+            if self._playwright is not None:
+                try:
+                    await self._playwright.stop()
+                except Exception as close_e:
+                    logger.warning("⚠️ 启动失败后停止 playwright 驱动失败: {}", close_e)
             raise
 
     async def stop(self):

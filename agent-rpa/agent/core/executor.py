@@ -7,6 +7,8 @@ Executor 是 Agent 与 Browser Tool 之间的桥梁。
 
 from __future__ import annotations
 
+from typing import Any
+
 from loguru import logger
 
 from agent.browser.playwright import BrowserTool
@@ -35,6 +37,21 @@ class Executor:
         self._tool = browser_tool
         self._element_map: dict[str, str] = {}
         self._frame_map: dict[str, tuple] = {}
+        # 分发表在 __init__ 构建一次（待解决问题 #25），避免每次 execute 重建
+        self._dispatch: dict[str, Any] = {
+            "click": self._execute_click,
+            "input": self._execute_input,
+            "select": self._execute_select,
+            "goto": self._execute_goto,
+            "scroll": self._execute_scroll,
+            "wait": self._execute_wait,
+            "download": self._execute_download,
+            "upload": self._execute_upload,
+            "back": self._execute_back,
+            "refresh": self._execute_refresh,
+            "screenshot": self._execute_screenshot,
+            "done": self._execute_done,
+        }
         logger.debug("Executor 初始化完成")
 
     async def execute(self, action: Action, snapshot: Snapshot | None = None) -> Observation:
@@ -61,27 +78,12 @@ class Executor:
                 error=f"Action 验证失败: {'; '.join(errors)}",
             )
 
-        dispatch = {
-            "click": self._execute_click,
-            "input": self._execute_input,
-            "select": self._execute_select,
-            "goto": self._execute_goto,
-            "scroll": self._execute_scroll,
-            "wait": self._execute_wait,
-            "download": self._execute_download,
-            "upload": self._execute_upload,
-            "back": self._execute_back,
-            "refresh": self._execute_refresh,
-            "screenshot": self._execute_screenshot,
-            "done": self._execute_done,
-        }
-
-        handler = dispatch.get(action.action)
+        handler = self._dispatch.get(action.action)
         if handler is None:
             logger.error("未知动作类型: {}", action.action)
             return Observation.fail(error=f"未知动作: {action.action}")
 
-        logger.debug("分发动: {} | target={} | target_id={}", action.action, action.target, action.target_id)
+        logger.debug("分发动作: {} | target={} | target_id={}", action.action, action.target, action.target_id)
         return await handler(action)
 
     # ── 各动作的具体执行 ────────────────────────────────────────────
@@ -229,7 +231,7 @@ class Executor:
         logger.info("🏁 任务完成: {}", action.value or "无备注")
         return Observation.ok(
             url=self._tool.current_url,
-            title=await self._tool.current_title,
+            title=await self._tool.current_title(),
             data={"message": action.value or "任务完成", "done": True},
         )
 

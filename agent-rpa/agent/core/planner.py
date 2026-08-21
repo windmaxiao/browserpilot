@@ -24,6 +24,7 @@ from loguru import logger
 from agent.llm.base import LLMClient, LLMError, LLMRetryableError
 from agent.prompts.planner import (
     BATCH_INSTRUCTION,
+    BATCH_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
     ActionParseError,
     build_action_schema,
@@ -182,6 +183,14 @@ class Planner:
         Agent 每次动作执行完成后调用（成功或失败均调用）。默认 no-op；
         状态型规划器（RuleBasedPlanner）覆盖本方法，用于在动作执行失败时
         回滚规划阶段乐观置位的状态。
+        """
+
+    def reset(self) -> None:
+        """重置规划器状态（待解决问题 #11）。
+
+        Agent.run() 开头调用，保证同一 Planner 复用于不同/相同目标时
+        无状态残留。默认 no-op；状态型规划器（RuleBasedPlanner）覆盖
+        本方法清空规划进度。
         """
 
 
@@ -432,7 +441,9 @@ class RuleBasedPlanner(Planner):
     @classmethod
     def _find_submit_button(cls, snapshot: Snapshot) -> Optional[ElementInfo]:
         for el in snapshot.buttons:
-            if any(k in el.text for k in cls._SEARCH_BUTTON_TEXTS):
+            # 大小写不敏感匹配（#25）：英文按钮如 "Search" / "Go"
+            text = el.text.lower()
+            if any(k.lower() in text for k in cls._SEARCH_BUTTON_TEXTS):
                 return el
         # 兜底：type=submit 的输入框
         for el in snapshot.inputs:
@@ -579,7 +590,7 @@ class LLMPlanner(Planner):
         )
         user_prompt = f"{base}\n\n{BATCH_INSTRUCTION}"
         raw = await self._call_llm_with_retry(
-            system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt, schema=schema,
+            system_prompt=BATCH_SYSTEM_PROMPT, user_prompt=user_prompt, schema=schema,
         )
         if raw is None:
             return None
@@ -596,7 +607,7 @@ class LLMPlanner(Planner):
                     return None
                 user_prompt = self._build_repair_prompt(user_prompt, raw, str(e))
                 raw = await self._call_llm_with_retry(
-                    system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt, schema=schema,
+                    system_prompt=BATCH_SYSTEM_PROMPT, user_prompt=user_prompt, schema=schema,
                 )
                 if raw is None:
                     return None
@@ -799,6 +810,15 @@ _CN_DIGITS = {
 
 # 等待语义关键词：命中即视为"应拆为 wait 步骤"
 _WAIT_KEYWORDS = ("等待", "延时", "延迟", "wait")
+# 待解决问题 #15：描述含操作动词时是正常操作而非等待步骤，纠正等待语义前
+# 先排除，避免「点击『等待付款』订单」这类描述被误纠为 wait 而永远无法完成。
+_ACTION_VERBS = (
+    "点击", "输入", "选择", "填写", "提交", "查询", "搜索", "打开", "切换",
+    "勾选", "下载", "上传", "验证", "确认", "回车", "按下",
+    # 英文操作动词：拆解 LLM 可能输出英文描述（如 "click and wait"）
+    "click", "input", "type", "fill", "select", "submit", "search",
+    "press", "open", "choose", "download", "upload",
+)
 
 # 等待 + 中文数字秒（如"等待五秒"、"等待十五秒"）
 _CN_SEC_RE = re.compile(r"([一两二三四五六七八九十]+)\s*秒")
@@ -837,8 +857,15 @@ def _extract_wait_ms(description: str) -> Optional[int]:
 
 
 def _looks_like_wait(description: str) -> bool:
-    """判断步骤描述是否含等待语义（框架兜底识别）。"""
-    return any(k in description.lower() for k in _WAIT_KEYWORDS)
+    """判断步骤描述是否含等待语义（框架兜底识别）。
+
+    待解决问题 #15：描述含操作动词（点击/输入/选择等）时判定为正常操作
+    而非等待步骤，避免「点击『等待付款』订单」被误纠为 wait。
+    """
+    text = description.lower()
+    if not any(k in text for k in _WAIT_KEYWORDS):
+        return False
+    return not any(v in text for v in _ACTION_VERBS)
 
 
 def _normalize_wait_steps(steps: list[TaskStep]) -> list[TaskStep]:
@@ -896,7 +923,13 @@ def parse_decompose_response(raw: Optional[dict], goal: str) -> Optional[list[Ta
             params = {"ms": ms}
         elif kind == "verify":
             vtype = str(params.get("type", "text")).strip() or "text"
-            params = {"type": vtype, "value": str(params.get("value", "")).strip()}
+            value = str(params.get("value", "")).strip()
+            if not value:
+                # 待解决问题 #14：无 value 的 verify 步骤无法校验（恒失败），
+                # 直接丢弃，避免任务卡死在验收。
+                logger.debug("丢弃无 value 的 verify 步骤: 「{}」", description)
+                continue
+            params = {"type": vtype, "value": value}
         steps.append(TaskStep(description=description, kind=kind, params=params))
     if not steps:
         return None

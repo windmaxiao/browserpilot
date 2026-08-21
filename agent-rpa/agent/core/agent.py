@@ -85,7 +85,7 @@ class Agent:
     def goal(self) -> str:
         return self._goal
 
-    async def run(self, goal: str) -> Observation:
+    async def run(self, goal: str, *, timeout_seconds: Optional[float] = None) -> Observation:
         """
         运行 Agent 完成任务。
 
@@ -97,6 +97,9 @@ class Agent:
 
         Args:
             goal: 用户目标描述
+            timeout_seconds: 可选的总执行超时（秒，待解决问题 #22）。
+                超时后中断当前执行并返回失败 Observation，避免 LLM 慢时
+                任务无限拉长（仅 max_steps 无 wall-clock 兜底）。
 
         Returns:
             最终 Observation（包含 done=True 或错误信息）
@@ -106,7 +109,26 @@ class Agent:
         self._memory.clear()
         self._current_step = 0
         self._recovery_count = 0
+        # 清空规划器状态（#11），保证复用 Agent 时无状态残留；外部自定义
+        # Planner 可能未实现 reset，用 getattr 防御（与 decompose 一致）。
+        reset = getattr(self._planner, "reset", None)
+        if reset is not None:
+            reset()
 
+        if timeout_seconds is None:
+            return await self._run_body(goal)
+        try:
+            return await asyncio.wait_for(
+                self._run_body(goal), timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("⏱️ 任务超时（{:.0f}s）终止 | goal: {}", timeout_seconds, goal)
+            return Observation.fail(
+                error=f"任务执行超过 {timeout_seconds:g} 秒，已终止",
+            )
+
+    async def _run_body(self, goal: str) -> Observation:
+        """run() 的执行体：由 Planner 是否支持拆解决定步骤 / 自由模式。"""
         decompose = getattr(self._planner, "decompose", None)
         steps = await decompose(goal) if decompose is not None else None
         if steps:
@@ -313,8 +335,29 @@ class Agent:
                         error=f"在第 {self._current_step} 步动作执行异常（浏览器可能已关闭）",
                     )
                 await self._record_step(self._current_step, action, observation)
+                # 等待失败：机械重试 1 次 → 页面恢复 → 中止（#7，与 action 步骤对齐）
                 if observation.is_error:
-                    return observation
+                    logger.warning(
+                        "❌ [Step {}] 计划内等待失败: {} → 重试",
+                        self._current_step, observation.error,
+                    )
+                    retry = await self._safe_execute(action, snapshot)
+                    if retry is None:
+                        return Observation.fail(
+                            error=f"在第 {self._current_step} 步动作执行异常（浏览器可能已关闭）",
+                        )
+                    if not retry.is_error:
+                        await self._record_step(self._current_step, action, retry)
+                        observation = retry
+                    elif self._recovery_count < self._max_recoveries and await self._recover_page():
+                        self._recovery_count += 1
+                        logger.info(
+                            "🔄 [Step {}] 页面已恢复，重试该等待步骤（恢复 {}/{}）",
+                            self._current_step, self._recovery_count, self._max_recoveries,
+                        )
+                        continue
+                    else:
+                        return retry
                 queue.pop()
                 logger.info("✅ [Step {}] 等待完成 | URL: {}", self._current_step, observation.url)
                 continue
@@ -424,17 +467,29 @@ class Agent:
         if action.value:
             log_action += f" = {str(action.value)[:50]}"
         logger.info("⚡ 手动执行: {}", log_action)
-        result = await self._executor.execute(action)
+        # 走 _safe_execute：浏览器被关闭等异常返回失败 Observation 而非崩溃（#8）
+        result = await self._safe_execute(action)
+        if result is None:
+            return Observation.fail(
+                error=f"动作执行异常（浏览器可能已关闭）: {action.action}",
+            )
         if result.is_error:
             logger.warning("❌ 手动执行失败: {}", result.error)
         else:
             logger.info("✅ 手动执行成功 | URL: {}", result.url)
         return result
 
-    async def observe(self) -> Snapshot:
-        """获取当前页面的 Snapshot（手动模式 / 调试用）"""
+    async def observe(self) -> Optional[Snapshot]:
+        """获取当前页面的 Snapshot（手动模式 / 调试用）。
+
+        Returns:
+            页面 Snapshot；浏览器被关闭等异常时返回 None（#8）。
+        """
         logger.info("📷 观察页面...")
-        snapshot = await self._observer.observe()
+        snapshot = await self._safe_observe()
+        if snapshot is None:
+            logger.warning("⚠️  观察页面失败（浏览器可能已关闭）")
+            return None
         self._log_snapshot(snapshot)
         return snapshot
 

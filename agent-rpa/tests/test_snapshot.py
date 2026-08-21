@@ -83,10 +83,11 @@ async def test_snapshot_generator_element_id():
     # 多次 query_selector_all 调用返回不同元素
     mock_page.query_selector_all = AsyncMock(side_effect=[
         [mock_btn],       # 第一次: buttons
-        [mock_input],     # 第二次: inputs
-        [],               # 第三次: links
-        [],               # 第四次: texts
-        [],               # 第五次: selects
+        [],               # 第二次: clickables（#16，Mock 恒空）
+        [mock_input],     # 第三次: inputs
+        [],               # 第四次: links
+        [],               # 第五次: texts
+        [],               # 第六次: selects
     ])
 
     sg = SnapshotGenerator(mock_page)
@@ -129,6 +130,7 @@ async def test_snapshot_generator_filters_invisible():
 
     mock_page.query_selector_all = AsyncMock(side_effect=[
         [visible_btn, invisible_btn],  # buttons: 一个可见一个隐藏
+        [],  # clickables（#16，Mock 恒空）
         [],  # inputs
         [],  # links
         [],  # texts
@@ -156,6 +158,7 @@ async def test_disambiguate_selectors_adds_visible():
 
     mock_page.query_selector_all = AsyncMock(side_effect=[
         [btn],  # buttons
+        [],  # clickables（#16，Mock 恒空）
         [], [], [], [],
     ])
 
@@ -182,6 +185,7 @@ async def test_disambiguate_selectors_nth_for_duplicates():
 
     mock_page.query_selector_all = AsyncMock(side_effect=[
         [make_btn(), make_btn()],  # 两个同文本可见按钮
+        [],  # clickables（#16，Mock 恒空）
         [], [], [], [],
     ])
 

@@ -123,7 +123,9 @@ def serialize_snapshot(
     """Snapshot → LLM 上下文（紧凑 dict，不含整页 HTML）。
 
     - 只包含可交互元素与有限页面元信息。
-    - 元素数量超过 ``max_elements`` 时截断并显式标记 ``elements_truncated``。
+    - 元素数量超过 ``max_elements`` 时截断并显式标记 ``elements_truncated``；
+      截断按类别分配配额（待解决问题 #21），避免 buttons/inputs 占满名额
+      导致 links/selects 整体丢失。
     - URL 经 :func:`sanitize_url` 脱敏。
     - 附带正文摘要（h1-p 等文本，前 ``max_text_elements`` 条，同样截断），
       帮助模型基于正文判断页面内容与任务完成条件。
@@ -131,7 +133,23 @@ def serialize_snapshot(
     elements = snapshot.get_interactive_elements()
     truncated = len(elements) > max_elements
     if truncated:
-        elements = elements[:max_elements]
+        # #21：按类别配额截断。每类先取 max_elements//4 个保底（保持各类别的
+        # 相对顺序），剩余名额按类别顺序补齐；不足 4 类的配额退回按序截断。
+        if max_elements < 4:
+            elements = elements[:max_elements]
+        else:
+            per_cat = max_elements // 4
+            categories = [snapshot.buttons, snapshot.inputs,
+                          snapshot.links, snapshot.selects]
+            taken = [list(cat[:per_cat]) for cat in categories]
+            remain = max_elements - sum(len(t) for t in taken)
+            for i, cat in enumerate(categories):
+                if remain <= 0:
+                    break
+                extra = min(remain, max(0, len(cat) - per_cat))
+                taken[i].extend(cat[per_cat:per_cat + extra])
+                remain -= extra
+            elements = [el for group in taken for el in group]
     data: dict[str, Any] = {
         "title": _truncate(snapshot.title, max_text_length),
         "url": sanitize_url(snapshot.url),
@@ -229,6 +247,25 @@ class ActionParseError(ValueError):
 SYSTEM_PROMPT = """你是网页任务规划器，而不是浏览器执行器。
 约束：
 - 每轮只能输出一个原子 Action，且只返回符合 JSON schema 的对象，不要添加 Markdown。
+- 可用 action 只能是以下枚举（请原样使用，不要用 type、fill、press、submit 等浏览器术语）：
+  click / input / select / goto / scroll / wait / download / upload / back / refresh / screenshot / done
+- 需要操作元素的动作必须引用当前 Snapshot 中的元素 ID（target_id），不得虚构元素或编号。
+- 不得构造 CSS、XPath、JavaScript 或任何选择器；不得提供 params.selector。
+- 输入文本必须用 input（value 为要输入的文本）；点击用 click；跳转用 goto（value 为完整 URL）。
+- 等待用 wait（value 为毫秒数，如 5000 表示等待 5 秒）。
+- 页面已满足用户目标时，输出 {"action": "done"}。
+- 目标中提及"关闭浏览器、退出、结束"等行为由调用方负责，Agent 完成全部页面操作后
+  直接输出 {"action": "done"}，不要反复 wait 或做无意义动作。
+- 涉及敏感信息输入、上传、下载、导航到外部 URL 等动作，必须服从调用方策略。"""
+
+
+# 批量规划专用系统提示词（待解决问题 #12）：与 SYSTEM_PROMPT 的唯一差异是输出约束，
+# 允许单动作或批量数组，避免「每轮只能输出一个原子 Action」与批量指令冲突。
+BATCH_SYSTEM_PROMPT = """你是网页任务规划器，而不是浏览器执行器。
+约束：
+- 每轮输出一个原子 Action；或对表单填写等不改变页面结构的同一页连续操作，
+  一次输出最多 10 个动作的批量数组。
+- 只返回符合 JSON schema 的对象，不要添加 Markdown。
 - 可用 action 只能是以下枚举（请原样使用，不要用 type、fill、press、submit 等浏览器术语）：
   click / input / select / goto / scroll / wait / download / upload / back / refresh / screenshot / done
 - 需要操作元素的动作必须引用当前 Snapshot 中的元素 ID（target_id），不得虚构元素或编号。

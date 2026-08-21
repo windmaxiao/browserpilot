@@ -67,6 +67,16 @@ class SnapshotGenerator:
         "button, a[href], [role='button'], input, select, textarea, "
         "[contenteditable='true'], [role='textbox']"
     )
+    # 逐元素路径（Mock 回退）的可点击文本选择器（#16）：与批量 JS 路径对齐，
+    # 用 CSS :not() 排除已被其他类别提取的元素；closest / cursor:pointer 为
+    # JS-only 过滤，Mock 环境无法模拟，此处仅做 CSS 层级粗筛。
+    _CLICKABLE_SKIP_NOT = (
+        ":not(button):not(a[href]):not([role='button']):not(input):not(select)"
+        ":not(textarea):not([contenteditable='true']):not([role='textbox'])"
+    )
+    SELECTOR_CLICKABLE_ALONE = ",".join(
+        f"{tag}{_CLICKABLE_SKIP_NOT}" for tag in ("p", "span", "div", "li", "td", "label")
+    )
     _CLICKABLE_MAX = 50  # 每帧可点击文本数量上限，防噪音爆炸
 
     # 批量 JS 提取函数：每个 frame scope 一次 evaluate 返回全部 5 类原始数据，
@@ -275,20 +285,24 @@ class SnapshotGenerator:
     async def _frame_segments(self, iframe_els: list) -> list[str]:
         """为同一父 document 内的 iframe 元素生成唯一定位段。
 
-        优先级：id → name → 父内位置（`iframe >> nth=j`，按 DOM 顺序消歧）。
+        优先级：id → name → 父内位置（`<tag> >> nth=j`，按 DOM 顺序消歧）。
         与 ElementInfo.selector 契约一致：每段都是父 document 内可定位该 iframe
         元素的选择器。重复的 id/name 段（含第一个）一律改用位置索引——
         非唯一段在 FrameLocator 严格模式下无法确定目标（待解决问题 #2）。
+        位置消歧按元素实际标签分桶（iframe/frame/object，待解决问题 #13）：
+        混合标签页面中 nth 索引只在该标签内计数，避免 `iframe >> nth=j`
+        在 `<frame>`/`<object>` 混排时索引错位。
         """
+        tags = [await self._frame_tag(el) or "iframe" for el in iframe_els]
         base = []
-        for el in iframe_els:
+        for el, tag in zip(iframe_els, tags):
             el_id = await self._frame_attr(el, "id")
             if el_id:
                 base.append(f"#{self._css_escape_ident(el_id)}")
                 continue
             name = await self._frame_attr(el, "name")
             if name:
-                base.append(f'iframe[name="{self._css_escape_string(name)}"]')
+                base.append(f'{tag}[name="{self._css_escape_string(name)}"]')
                 continue
             base.append(None)  # 交由位置消歧
         # 统计语义段出现次数：任何重复的 id/name 段都改用位置索引
@@ -297,12 +311,23 @@ class SnapshotGenerator:
             if seg is not None:
                 counts[seg] = counts.get(seg, 0) + 1
         result = []
-        for j, seg in enumerate(base):
+        tag_index: dict[str, int] = {}
+        for seg, tag in zip(base, tags):
             if seg is not None and counts[seg] == 1:
                 result.append(seg)
             else:
-                result.append(f"iframe >> nth={j}")
+                n = tag_index.get(tag, 0)
+                tag_index[tag] = n + 1
+                result.append(f"{tag} >> nth={n}")
         return result
+
+    @staticmethod
+    async def _frame_tag(el) -> str:
+        """获取元素标签名（小写）；异常时回退空串。"""
+        try:
+            return (await el.evaluate("(el) => el.tagName.toLowerCase()")) or ""
+        except Exception:
+            return ""
 
     @staticmethod
     async def _frame_attr(el, key: str) -> str:
@@ -319,7 +344,45 @@ class SnapshotGenerator:
         infos = await asyncio.gather(
             *(self._extract_element_info(el, i, frame_path) for i, el in enumerate(elements))
         )
-        result = [info for info in infos if info and info.text.strip()]
+        result = []
+        for info in infos:
+            if info is None:
+                continue
+            if not info.text.strip():
+                # #24：纯图标按钮以占位文本保留（与批量 JS 路径 _build_infos 一致）
+                if self._is_icon_button(info):
+                    info.text = f"图标按钮#{info.index + 1}"
+                else:
+                    continue
+            result.append(info)
+        self._disambiguate_selectors(result)
+        return result
+
+    async def _extract_clickables(self, scope, frame_path=()) -> list[ElementInfo]:
+        """提取可点击文本元素（Mock 回退路径，#16 与批量 JS 路径对齐）。
+
+        与批量 JS 路径的差异：closest / cursor:pointer 过滤为 JS-only，Mock 环境
+        无法模拟；无文本元素以「交互属性=值」回退展示文本（与 JS 路径一致）。
+        """
+        elements = await scope.query_selector_all(self.SELECTOR_CLICKABLE_ALONE)
+        infos = await asyncio.gather(
+            *(self._extract_element_info(el, i, frame_path) for i, el in enumerate(elements))
+        )
+        result = []
+        for info in infos:
+            if info is None:
+                continue
+            text = info.text.strip()
+            if not text:
+                # 与批量 JS 路径一致：空文本可点击元素以交互属性回退（如 data-code=10000381）
+                for attr in ("gcode", "data-source", "data-id", "data-code", "data-action"):
+                    value = info.attributes.get(attr, "")
+                    if value:
+                        text = f"{attr}={value}"
+                        break
+            if text:
+                info.text = text[:200]
+                result.append(info)
         self._disambiguate_selectors(result)
         return result
 
@@ -371,8 +434,11 @@ class SnapshotGenerator:
         """
         from playwright.async_api import Frame as _Frame, Page as _Page
         if not isinstance(scope, (_Page, _Frame)):
+            # 逐元素路径：clickables 与批量 JS 路径一致合并进 buttons（#16）
+            buttons = await self._extract_buttons(scope, frame_path)
+            buttons += await self._extract_clickables(scope, frame_path)
             return (
-                await self._extract_buttons(scope, frame_path),
+                buttons,
                 await self._extract_inputs(scope, frame_path),
                 await self._extract_links(scope, frame_path),
                 await self._extract_texts(scope, frame_path),
@@ -396,6 +462,18 @@ class SnapshotGenerator:
             self._build_infos(data.get("selects", []), frame_path, require_text=False, disambiguate=True),
         )
 
+    @staticmethod
+    def _is_icon_button(info: ElementInfo) -> bool:
+        """判断是否纯图标按钮（button / role=button / input[type=button|submit|image]）。
+
+        #24：这类按钮无文本 / aria-label / value，需以占位文本保留供 LLM 引用。
+        """
+        if info.tag == "button":
+            return True
+        if info.tag == "input" and info.attributes.get("type") in ("button", "submit", "image"):
+            return True
+        return info.attributes.get("role", "") == "button"
+
     def _build_infos(
         self, raw_list: list, frame_path: tuple, *,
         require_text: bool, disambiguate: bool,
@@ -407,7 +485,12 @@ class SnapshotGenerator:
             if info is None:
                 continue
             if require_text and not info.text.strip():
-                continue
+                # #24：纯图标按钮以「图标按钮#序号」占位文本保留，
+                # 避免无文本 / aria-label 的关闭、图标操作按钮对 Agent 不可见。
+                if self._is_icon_button(info):
+                    info.text = f"图标按钮#{i + 1}"
+                else:
+                    continue
             infos.append(info)
         if disambiguate:
             self._disambiguate_selectors(infos)
@@ -446,7 +529,7 @@ class SnapshotGenerator:
             text=text[:200],
             element_id=f"e{self._element_counter}",
             tag=tag,
-            element_type=self._infer_type(tag),
+            element_type=self._infer_type(tag, attrs.get("type", "")),
             selector=selector,
             bbox=bbox,
             aria_label=aria_label,
@@ -546,7 +629,7 @@ class SnapshotGenerator:
             text=text[:200],
             element_id=element_id,
             tag=tag,
-            element_type=self._infer_type(tag),
+            element_type=self._infer_type(tag, all_attrs.get("type", "")),
             selector=selector,
             bbox=bbox_dict,
             aria_label=aria_label,
@@ -667,8 +750,10 @@ class SnapshotGenerator:
             else:
                 el.selector = visible_selector
 
-    def _infer_type(self, tag: str) -> str:
-        """从标签名推断元素类型"""
+    def _infer_type(self, tag: str, type_attr: str = "") -> str:
+        """从标签名推断元素类型；input 按 type 属性细分 checkbox/radio（#25）。"""
+        if tag == "input" and type_attr in ("checkbox", "radio"):
+            return type_attr
         type_map = {
             "button": "button",
             "a": "link",
@@ -687,10 +772,14 @@ class SnapshotGenerator:
         except Exception:
             return True
 
-    async def detect_page_type(self) -> str:
-        """尝试推断页面类型"""
-        url = self._page.url.lower()
-        title = (await self._page.title()).lower()
+    async def detect_page_type(self, title: str = "", url: str = "") -> str:
+        """尝试推断页面类型。
+
+        ``title`` / ``url`` 可选：调用方已有 Snapshot（Observer.observe）时
+        传入复用，避免重复向页面发起 title CDP 调用（待解决问题 #25）。
+        """
+        url = (url or self._page.url).lower()
+        title = (title or await self._page.title()).lower()
 
         if any(k in url or k in title for k in ("login", "signin", "登录")):
             return "login"

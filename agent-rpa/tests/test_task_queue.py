@@ -181,6 +181,27 @@ def test_normal_action_steps_not_corrected():
     assert all(s.kind == "action" for s in steps)
 
 
+def test_wait_keyword_in_operation_description_not_corrected():
+    """描述含操作动词时，即使带"等待"字样也不纠正为 wait（#15）"""
+    raw = {"steps": [
+        {"description": "点击等待付款的订单", "kind": "action"},
+        {"description": "输入等待时间", "kind": "action"},
+        {"description": "click pay button and wait for result", "kind": "action"},
+    ]}
+    steps = parse_decompose_response(raw, "目标")
+    assert all(s.kind == "action" for s in steps)
+
+
+def test_verify_step_without_value_dropped():
+    """无 value 的 verify 步骤被丢弃（#14），不卡死验收"""
+    raw = {"steps": [
+        {"description": "打开百度", "kind": "action"},
+        {"description": "验收结果", "kind": "verify", "params": {"type": "text"}},
+    ]}
+    steps = parse_decompose_response(raw, "目标")
+    assert [s.kind for s in steps] == ["action"]
+
+
 # ═══════════════════════════════════════════════════════════════
 # TaskPlanner
 # ═══════════════════════════════════════════════════════════════

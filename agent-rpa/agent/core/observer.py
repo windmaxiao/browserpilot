@@ -38,7 +38,10 @@ class Observer:
         snapshot = await self._generator.generate()
 
         if not snapshot.page_type:
-            snapshot.page_type = await self._generator.detect_page_type()
+            # 复用 Snapshot 已取回的 title/url，避免 detect_page_type 重复发 CDP（#25）
+            snapshot.page_type = await self._generator.detect_page_type(
+                snapshot.title, snapshot.url,
+            )
 
         logger.info(
             "Snapshot 就绪 | title={} | 交互元素={} | page_type={}",

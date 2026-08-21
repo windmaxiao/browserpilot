@@ -6,6 +6,8 @@ Observe → Plan → Execute → Record，以及 done / 执行失败 / 非法 Ac
 V0.3 起 Agent 通过 plan_with_history 向 Planner 传入有限历史。
 """
 
+import asyncio
+
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -25,6 +27,11 @@ class _PlannerStub:
     def __init__(self, actions=None):
         self._actions = list(actions) if actions else []
         self.calls: list[dict] = []
+        self.reset_calls = 0
+
+    def reset(self):
+        """Agent.run() 开头调用（待解决问题 #11）。"""
+        self.reset_calls += 1
 
     async def plan_batch(self, snapshot, goal, history):
         self.calls.append({"goal": goal, "history_len": len(history)})
@@ -76,6 +83,46 @@ async def test_three_step_success_flow():
     tool.click.assert_awaited_once_with(
             "#search-btn", timeout=5000, force=False, frame_path=()
         )
+
+
+@pytest.mark.asyncio
+async def test_run_resets_planner_state():
+    """run() 开头调用 planner.reset()（#11）：复用 Agent 同 goal 二次 run 无状态残留"""
+    agent, planner, tool = make_mocks([
+        Action(action="input", value="北京时间",
+               params={"selector": "#search-box"}),
+        done("任务完成"),
+        Action(action="input", value="上海天气",
+               params={"selector": "#search-box"}),
+        done("任务完成"),
+    ])
+
+    await agent.run("查找 北京时间")
+    await agent.run("查找 北京时间")   # 同 goal 二次 run，Planner 状态已清空
+
+    assert planner.reset_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_run_timeout_returns_failure():
+    """run(timeout_seconds=...) 超时返回失败 Observation（#22）"""
+    snapshot = Snapshot(title="测试页", url="https://example.com")
+    observer = MagicMock()
+    observer.observe = AsyncMock(return_value=snapshot)
+
+    async def _slow_plan_batch(snapshot, goal, history):
+        await asyncio.sleep(5)   # 模拟慢 LLM
+        return [done("完成")]
+
+    planner = _PlannerStub()
+    planner.plan_batch = _slow_plan_batch
+    tool = MagicMock()
+    executor = Executor(tool)
+    agent = Agent(observer, planner, executor, max_steps=10)
+
+    obs = await agent.run("目标", timeout_seconds=0.1)
+    assert obs.is_error
+    assert "超时" in obs.error
 
 
 @pytest.mark.asyncio
@@ -812,3 +859,81 @@ async def test_repeat_action_detection_resets_after_page_change():
 
     assert obs.success is True
     assert tool.click.await_count == 2   # 每次点击都改变页面，不触发重复检测
+
+
+# ── #7 / #8：步骤模式 wait 失败重试 / 手动 API 异常防护 ──────────────
+
+@pytest.mark.asyncio
+async def test_step_mode_wait_failure_mechanical_retry_succeeds():
+    """#7 计划内 wait 失败 → 机械重试 1 次成功 → 任务继续完成"""
+    from agent.core.planner import TaskStep
+
+    agent, planner, tool = make_step_agent([
+        TaskStep(description="等待加载", kind="wait", params={"ms": 1000}),
+        TaskStep(description="点击按钮", kind="action"),
+    ], actions_by_index={1: [Action(action="click", params={"selector": "#btn"})]})
+    tool.wait = AsyncMock(side_effect=[
+        Observation.fail("浏览器暂不可用"),   # 首次失败
+        Observation.ok(page_changed=True),    # 机械重试成功
+    ])
+
+    obs = await agent.run("任务")
+
+    assert obs.success is True
+    assert tool.wait.await_count == 2   # 首次失败 + 机械重试成功
+    tool.click.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_step_mode_wait_failure_recovers_page_then_succeeds():
+    """#7 计划内 wait 失败且机械重试也失败 → 页面恢复后重新执行 → 任务完成"""
+    from agent.core.planner import TaskStep
+
+    agent, planner, tool = make_step_agent([
+        TaskStep(description="等待加载", kind="wait", params={"ms": 1000}),
+    ])
+    tool.wait = AsyncMock(side_effect=[
+        Observation.fail("失败 1"),           # 首次
+        Observation.fail("失败 2"),           # 机械重试
+        Observation.ok(page_changed=True),    # 恢复后重新执行成功
+    ])
+    tool.back = AsyncMock(return_value=Observation.ok(page_changed=True))
+
+    obs = await agent.run("任务")
+
+    assert obs.success is True
+    assert tool.wait.await_count == 3
+    tool.back.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_manual_step_returns_fail_observation_on_browser_closed():
+    """#8 手动 step()：浏览器关闭（执行器抛异常）→ 返回失败 Observation 而非崩溃"""
+    observer = MagicMock()
+    observer.observe = AsyncMock(return_value=Snapshot(title="t", url="https://example.com"))
+    planner = _PlannerStub([])
+    tool = MagicMock()
+    tool.click = AsyncMock(side_effect=Exception("Target closed"))
+    tool.current_url = "https://example.com"
+
+    agent = Agent(observer, planner, Executor(tool), max_steps=10)
+    result = await agent.step(Action(action="click", params={"selector": "#btn"}))
+
+    assert isinstance(result, Observation)
+    assert result.is_error is True
+    assert "浏览器可能已关闭" in result.error
+
+
+@pytest.mark.asyncio
+async def test_manual_observe_returns_none_on_browser_closed():
+    """#8 手动 observe()：浏览器关闭（观察器抛异常）→ 返回 None 而非崩溃"""
+    observer = MagicMock()
+    observer.observe = AsyncMock(side_effect=Exception("Target closed"))
+    planner = _PlannerStub([])
+    tool = MagicMock()
+    tool.current_url = "https://example.com"
+
+    agent = Agent(observer, planner, Executor(tool), max_steps=10)
+    result = await agent.observe()
+
+    assert result is None

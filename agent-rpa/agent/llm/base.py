@@ -37,6 +37,11 @@ class LLMClient(Protocol):
             system_prompt: 系统提示词。
             user_prompt: 用户提示词。
             schema: 期望的输出结构描述（Provider 可映射为结构化输出 / JSON Schema）。
+
+                当前实现（OpenAILLMClient）暂不使用该参数：仅固定请求
+                ``response_format=json_object``，结构约束由提示词承担（待解决问题
+                #18）。保留该参数作为结构化输出能力（``json_schema`` 等端点）的
+                预留接口，调用方仍应传入真实 schema 以兼容未来实现。
             timeout: 超时（毫秒）。
 
         Returns:

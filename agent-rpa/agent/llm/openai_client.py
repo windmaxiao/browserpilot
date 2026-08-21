@@ -31,6 +31,7 @@ from agent.llm.base import (
 # 国内主流大模型 OpenAI 兼容端点预设。
 # 字段：base_url（兼容端点）/ model（默认模型）/ env_key（专属 API Key 环境变量）。
 # 任一字段均可被显式参数或通用环境变量（OPENAI_BASE_URL / OPENAI_MODEL / OPENAI_API_KEY）覆盖。
+# model 已按各厂商官方文档/模型清单逐一核对（2026-08，待解决问题 #6）。
 PROVIDER_PRESETS: dict[str, dict[str, str]] = {
     # DeepSeek 开放平台（deepseek-chat / deepseek-reasoner 已停用，改用 V4 系列）
     "deepseek": {
@@ -56,7 +57,8 @@ PROVIDER_PRESETS: dict[str, dict[str, str]] = {
         "model": "qwen3.8-max",
         "env_key": "DASHSCOPE_API_KEY",
     },
-    # 火山方舟（豆包）：model 为推理接入点 ID，需在方舟控制台创建
+    # 火山方舟（豆包）：doubao-seed-2.1-pro（2026-06 发布）；
+    # model 可直接传模型 ID，亦可传控制台创建的自定义推理接入点 ID
     "doubao": {
         "base_url": "https://ark.cn-beijing.volces.com/api/v3",
         "model": "doubao-seed-2-1-pro-260628",
