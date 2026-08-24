@@ -147,6 +147,16 @@ def test_wait_semantics_chinese_digits():
     assert [s.params["ms"] for s in steps] == [5000, 3000]
 
 
+def test_wait_semantics_invalid_chinese_digits_defaults_1000():
+    """M2：非法中文数字组合（如"一二秒"）不抛 KeyError，回退默认 1000ms"""
+    raw = {"steps": [
+        {"description": "等待一二秒", "kind": "action"},
+    ]}
+    steps = parse_decompose_response(raw, "目标")
+    assert all(s.kind == "wait" for s in steps)
+    assert [s.params["ms"] for s in steps] == [1000]
+
+
 def test_wait_semantics_without_number_defaults_1000():
     """无数字的等待（页面加载完成）默认 1000ms"""
     raw = {"steps": [

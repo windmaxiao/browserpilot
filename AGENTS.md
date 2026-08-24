@@ -267,6 +267,8 @@ class Snapshot:
 | `refresh()` | — | 刷新页面 |
 | `screenshot(full_page)` | bool | 截图返回 base64 |
 
+> V1.0 子计划 A：`click/input/select/download/upload` 五个元素定位方法均新增 `frame_path` 参数（元组，空为主页面，默认 `()`），按 iframe 定位段解析最终 Locator（见下方「iframe 定位」）。
+
 **BrowserManager** — 浏览器生命周期管理：
 
 | 方法 | 说明 |
@@ -311,20 +313,21 @@ class Agent:
 
 | 方法 | 说明 |
 |------|------|
-| `run(goal)` | 完整 Agent 循环：先尝试 `planner.decompose()`，成功走步骤模式，否则走自由模式 |
+| `run(goal, timeout_seconds)` | 完整 Agent 循环：先尝试 `planner.decompose()`，成功走步骤模式，否则走自由模式；`timeout_seconds` 为可选总执行超时（墙钟，兜底 max_steps） |
 | `step(action)` | 单步执行（手动/调试模式） |
 | `observe()` | 获取当前页面 Snapshot |
 
-**run() 两种模式（V0.4 前瞻）：**
+**run() 两种模式（V0.4 前瞻 + V1.0 批量增强）：**
 - **步骤模式**（Planner.decompose 返回步骤队列）：按 `TaskQueue` 逐项执行；`wait` 步骤由框架直接 `wait(ms)`、`verify` 步骤由框架校验 URL/文本，**均不经过 LLM**；`action` 步骤经 `plan_step()` 携带「当前步骤 + 剩余步骤」上下文分步决策；队列耗尽即任务完成（无需 LLM 输出 done）
-- **自由模式**（拆解失败 / Planner 不支持）：Observe→Plan→Execute→Record 循环直到 LLM 输出 done（V0.3 旧行为）
+- **自由模式**（拆解失败 / Planner 不支持）：Observe→Plan→Execute→Record 循环直到 LLM 输出 done；**V1.0 批量增强**：每轮只 observe 一次、经 `plan_batch()` 一次 LLM 返回最多 10 个动作（`BATCH_SYSTEM_PROMPT` / `build_hybrid_schema` / `parse_action_list`），多个动作在同一 Snapshot 上连续执行，任一失败、页面变化或遇到 done 即结束本批回到主循环重新观察（表单填写从 N 次 LLM 降为 1 次）
 
 **关键设计决策：**
 - Step 索引从 1 开始
 - **失败自动重试（V0.4）**：机械重试 1 次 → Reflection（LLM 分析失败给出替代动作）1 次 → 仍失败尝试页面恢复（back/refresh）→ 仍失败中止任务
 - Planner 返回 None 表示无法规划
 - **异常防护**：`_safe_observe()` / `_safe_execute()` 捕获浏览器关闭等异常，优雅返回失败 Observation 而非崩溃
-- **停滞检测**：LLM 在 action 步骤中连续 2 次 wait 且页面无变化 → 提前终止；计划内 wait 步骤不计入
+- **停滞检测**：自由模式连续 2 次 wait 且页面无变化 → 提前终止；计划内 wait 步骤不计入（步骤模式不做该检测，队列必然推进）
+- **重复动作检测（V1.0 批量增强）**：页面未变化时连续对同一目标执行相同动作（input/click/select/scroll），连续 `_MAX_REPEAT_SKIPS=3` 次即判停滞终止，防止 LLM 反复填同一字段
 - **iframe 定位与恢复（V1.0 子计划 A）**：`ElementInfo` 携带 `frame_path`（元组，空为主页面）；Executor 维护 `element_id → (selector, frame_path)` 映射并向 BrowserTool 透传；`target_id` 命中时优先于注入的 `params["selector"]`；frame 失效后旧路径作废，需重新 Observe 再解析 `target_id`
 - **历史记忆（V0.5）**：每步经 `_record_step()` 写入原始历史与 `HistoryMemory`，`plan_with_history` / `plan_step` / `reflect` 传 `memory.context_entries()`（摘要 + 最近窗口）而非原始全量历史
 
@@ -339,7 +342,8 @@ class Executor:
 - `_resolve_selector(target, params)` — 优先级：
   1. `params["selector"]` 显式指定
   2. CSS 选择器风格（以 `#`, `.`, `[`, `:` 开头）
-  3. 默认 `:has-text("...")` 子串匹配（与 SnapshotGenerator 统一）
+  3. 纯 HTML 标签名直通（如 `input`、`button`，`_HTML_TAGS` 集合内）
+  4. 默认 `:has-text("...")` 子串匹配（与 SnapshotGenerator 统一）
 - `_build_frame_map(snapshot)` / `_resolve_frame_path(action)` — iframe 支持（V1.0 子计划 A）：构建 `element_id → frame_path` 映射；`target_id` 命中时透传 frame_path 给 BrowserTool，且**优先于注入的 `params["selector"]`**
 
 #### `observer.py` — Observer
@@ -359,7 +363,7 @@ class Observer:
 | 类/函数 | 说明 |
 |----|------|
 | `parse_goal(goal)` | 从目标提取 URL / 搜索词 / 点击目标 / 等待条件 → TaskSpec |
-| `Planner` | 基类，`plan()` 抛出 NotImplementedError；`plan_with_history()` 默认转发 plan；`decompose()` 默认返回 None（自由模式）；`plan_step()` 默认退化为 plan_with_history |
+| `Planner` | 基类，`plan()` 抛出 NotImplementedError；`plan_with_history()` 默认转发 plan；`plan_batch()` 默认退化为单动作（V1.0 批量增强）；`decompose()` 默认返回 None（自由模式）；`plan_step()` 默认退化为 plan_with_history；`reflect()` 默认返回 None（不支持 Reflection）；`on_action_result()` / `reset()` 默认 no-op |
 | `RuleBasedPlanner` | 规则引擎（V0.2 完成）：8 条内置规则 + `add_rule()` 自定义规则优先 |
 | `LLMPlanner` | LLM 规划器（V0.3 完成，自由模式）：Snapshot 序列化 → 提示词 → 模型输出 → 安全 Action 转换；内容层错误最多一次修复；`reflect()` 失败反思（V0.4） |
 | `TaskStep` / `TaskQueue` | 任务步骤数据模型与队列（V0.4 前瞻）：kind ∈ action/wait/verify；wait/verify 由框架直接执行 |
@@ -440,6 +444,7 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 | `serialize_history()` | 历史压缩为「摘要 + 最近窗口」（V0.3 滑动窗口 5 条 + V0.5 摘要条目渲染，剔除截图/下载路径/堆栈） |
 | `build_action_schema()` | 模型输出 schema，action 枚举与 `Action.validate()` 同源 |
 | `parse_action_dict()` | 模型 dict → 已验证 Action：伪造 selector 忽略、target_id 必须命中、未知字段丢弃 |
+| `BATCH_SYSTEM_PROMPT` / `build_hybrid_schema()` / `parse_action_list()` | 批量规划（V1.0 自由模式增强）：导航/跳转场景输出单 Action、表单场景输出 `{"actions":[...]}`（最多 10 个）；解析兼容单/批量两种输出 |
 
 **安全边界（模型不能越界）：** 模型只看到 `target_id` 与语义字段；可执行 selector 只由本地 Snapshot 映射注入；幻觉 ID、非法 action、伪造 selector 一律在进入 Executor 前被拦截。
 
@@ -469,17 +474,18 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 - ✅ **Snapshot 批量 JS 提取（V1.0 前性能优化）**：把逐元素约 15 次 CDP 调用合并为每帧 1 次 `frame.evaluate`（`_EXTRACT_JS` + `_extract_scope` + `_from_raw`），解决大页面（如 SAP 多层 iframe）Snapshot 生成 500s+ 的问题（详见 [待解决问题.md](待解决问题.md) #9）；真实 Page/Frame 走批量路径，Mock 自动回退逐元素路径保持测试兼容
 - ✅ **iframe 支持（V1.0 子计划 A）**：`ElementInfo` 新增 `frame_path`（元组，空为主页面）；`SnapshotGenerator` 递归遍历多层 iframe（`_iter_scopes`/`_walk_scopes`/`_frame_segments`，重复 id/name 用位置 `nth=j` 消歧，子 frame 加载有限超时跳过）；`Executor` 构建 `element_id → frame_path` 映射（target_id 优先于注入 selector）；`BrowserTool._locator` 逐层 `frame_locator` 穿透；frame 失效后重新 Observe 再解析；真实 Playwright 浏览器三层 iframe fixture 测试（`test_snapshot_frame.py`）
 - ✅ **Memory（V0.5）**：`HistoryMemory` 增量式历史记忆（滚动摘要：超出窗口的旧条目按批折叠，默认 `window=5, batch=10`，可注入异步 LLM 摘要器）、`summarize_entries()` 规则式摘要（不含输入值/URL 等敏感内容）、上下文压缩（`context_entries()` = 摘要 + 最近窗口，摘要不占窗口名额）、`serialize_history` / `build_user_prompt` 摘要协议、Agent `_record_step()` 同步记录 + `plan_with_history` / `plan_step` / `reflect` 传压缩上下文
-- ✅ 16 个测试文件，300+ 个用例（Schema / Executor / Planner / BrowserTool / SnapshotGenerator / Snapshot iframe / Agent 集成 / LLMClient / 序列化 / LLMPlanner / Memory / Logging / TaskQueue）
+- ✅ **批量规划（V1.0 自由模式增强）**：`plan_batch()` 一次 LLM 返回最多 10 个动作（`BATCH_SYSTEM_PROMPT` / `build_hybrid_schema` 混合 schema / `parse_action_list` 兼容单/批量输出），同 Snapshot 连续执行、任一失败/页面变化/done 即断批；`Planner.plan_batch` 默认退化为单动作保证兼容；**重复动作检测**（页面未变化时连续 `_MAX_REPEAT_SKIPS=3` 次相同动作判停滞）；**`run(goal, timeout_seconds)`** 墙钟超时兜底
+- ✅ 16 个测试文件，400+ 个用例（Schema / Executor / Planner / BrowserTool / SnapshotGenerator / Snapshot iframe / Agent 集成 / LLMClient / 序列化 / LLMPlanner / Memory / Logging / TaskQueue）
 - ✅ 5 个 Demo（手动 / 规则 Agent 本地页 / 规则 Agent 百度 / LLM Agent 自由模式 / LLM Agent 两阶段真实百度，端到端跑通）+ 1 个业务示例（`examples/ex_robot/ydgx`：LLM 局部辅助 + 多层 iframe + 失败回退确定性，不入 git）
 
 ### 已知问题（详见 [待解决问题.md](待解决问题.md)，下表为摘要）
 
 | # | 问题 | 优先级 | 状态 |
 |---|------|--------|------|
-| 3 | texts 含 span 噪音 | 🟡 | 暂不处理 |
-| 20 | 规则 7「点击首条结果」非死代码，设计取舍保留 | 🟡 | 🔒 保留 |
+| 1 | texts 含 span 噪音 | 🟡 | 暂不处理 |
+| — | 规则 7「点击首条结果」非死代码，设计取舍保留（本文件自管，未入 待解决问题.md） | 🟡 | 🔒 保留 |
 
-> 完整列表见 [待解决问题.md](待解决问题.md)：当前跟踪 2 项（🟡 2），已解决条目随修复移除，编号不复用（#16-#25 为 2026-08 增补，其中 #10-#19/#21/#22/#24、#6、#7、#8、#23、#25 已修复，#20 确认保留）。
+> 完整列表见 [待解决问题.md](待解决问题.md)：当前跟踪 2 项（🟡 1、🟢 1），已解决条目随修复移除，编号不复用（#16-#25 为 2026-08 增补，其中 #10-#19/#21/#22/#24、#6、#7、#8、#23、#25 已修复，#20 确认保留；2026-08-24 修复步骤模式 wait 重试与手动 step()/observe() 防护后，待解决问题.md 原 #3/#4 已移除）。
 
 ---
 

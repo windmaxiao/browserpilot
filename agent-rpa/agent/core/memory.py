@@ -14,7 +14,10 @@ HistoryMemory —— 增量式历史记忆（V0.5 Memory）
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Awaitable, Callable, Optional
+
+from loguru import logger
 
 # 摘要器类型：输入一批原始历史条目，输出一段摘要文本
 Summarizer = Callable[[list[dict]], Awaitable[str]]
@@ -71,6 +74,7 @@ class HistoryMemory:
         summarize_batch: 每批折叠条数（达到 window + batch 时触发一次）
         summarizer: 可选异步摘要器 ``async (entries) -> str``；
             未提供时使用规则式 :func:`summarize_entries`（LLM 摘要扩展点）
+        summarize_timeout: 注入摘要器单次调用超时（秒），超时/异常降级规则式
     """
 
     def __init__(
@@ -79,12 +83,14 @@ class HistoryMemory:
         window: int = 5,
         summarize_batch: int = 10,
         summarizer: Optional[Summarizer] = None,
+        summarize_timeout: float = 30.0,
     ):
         if window < 1 or summarize_batch < 1:
             raise ValueError("window / summarize_batch 必须为正整数")
         self._window = window
         self._batch = summarize_batch
         self._summarizer = summarizer
+        self._summarize_timeout = summarize_timeout
         self._entries: list[dict] = []
         self._summary_lines: list[str] = []
         self._summarized_upto = 0
@@ -124,10 +130,19 @@ class HistoryMemory:
             self._summarized_upto += len(batch)
 
     async def _summarize(self, batch: list[dict]) -> str:
-        """对一批条目生成摘要：优先使用注入的摘要器，否则规则式。"""
+        """对一批条目生成摘要：优先使用注入的摘要器，否则规则式。
+
+        M3：注入摘要器（文档扩展点，如 LLM）可能抛网络异常或长时间阻塞，
+        加超时与异常防护，失败降级为规则式摘要——摘要失败不应阻断任务本身。
+        """
         if self._summarizer is not None:
-            text = await self._summarizer(batch)
-            return str(text).strip()
+            try:
+                text = await asyncio.wait_for(
+                    self._summarizer(batch), timeout=self._summarize_timeout,
+                )
+                return str(text).strip()
+            except Exception as e:
+                logger.warning("注入摘要器失败/超时，降级规则式摘要: {}", e)
         return summarize_entries(batch)
 
     # ── 上下文输出 ──────────────────────────────────────────────────

@@ -8,6 +8,7 @@ Memory 测试（V0.5）
 - Agent 集成：长任务 Planner 收到摘要、history 原始完整
 """
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -146,6 +147,38 @@ class TestHistoryMemory:
             mem.add(_entry(i))
             await mem.maybe_summarize()
         assert mem.summary == ""
+
+    @pytest.mark.asyncio
+    async def test_summarizer_error_falls_back_to_rule_based(self):
+        """M3：注入摘要器抛异常时降级规则式摘要，不阻断记录流程"""
+        calls = 0
+
+        async def broken_summarizer(batch):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("网络错误")
+
+        mem = self._memory(summarizer=broken_summarizer)
+        for i in range(1, 16):
+            mem.add(_entry(i))
+        await mem.maybe_summarize()  # 不应抛异常
+        assert calls == 1
+        assert mem.summary.splitlines() == ["click 成功"] * 10
+
+    @pytest.mark.asyncio
+    async def test_summarizer_timeout_falls_back_to_rule_based(self):
+        """M3：注入摘要器超时（无返回）降级规则式摘要"""
+        async def slow_summarizer(batch):
+            await asyncio.sleep(5)
+
+        mem = HistoryMemory(
+            window=5, summarize_batch=10,
+            summarizer=slow_summarizer, summarize_timeout=0.1,
+        )
+        for i in range(1, 16):
+            mem.add(_entry(i))
+        await mem.maybe_summarize()  # 不应抛异常
+        assert mem.summary.splitlines() == ["click 成功"] * 10
 
     def test_clear(self):
         mem = self._memory()

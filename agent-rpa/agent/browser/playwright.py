@@ -329,7 +329,7 @@ class BrowserTool:
         logger.info("⬆️ upload: {} → {}", selector, file_path)
         start = time.time()
         try:
-            locator = await self._locator(selector, frame_path)
+            locator = self._locator(selector, frame_path)
             await locator.wait_for(state="visible", timeout=timeout)
             await locator.set_input_files(str(file_path))
             elapsed = time.time() - start

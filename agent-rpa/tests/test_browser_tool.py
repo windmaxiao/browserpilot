@@ -321,3 +321,181 @@ class TestBrowserManagerLaunch:
         fake_launcher = MagicMock()
         fake_launcher.start = _start
         monkeypatch.setattr(mod, "async_playwright", lambda: fake_launcher)
+
+
+# ── C4: 补 6 个未测试方法（goto/download/upload/back/refresh/screenshot）──────
+
+def make_download_page_mock():
+    """构造带 expect_download 的 Page Mock（模拟下载）"""
+    page, locator = make_page_mock()
+    download = MagicMock()
+    download.suggested_filename = "report.csv"
+    download.save_as = AsyncMock()
+
+    class _FakeDownloadContext:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        @property
+        def value(self):
+            # 与 Playwright API 对齐：download_info.value 是 coroutine 属性
+            async def _resolve():
+                return download
+
+            return _resolve()
+
+    page.expect_download = MagicMock(return_value=_FakeDownloadContext())
+    return page, locator, download
+
+
+class TestGoto:
+    """goto() 导航"""
+
+    @pytest.mark.asyncio
+    async def test_goto_success(self):
+        page, _ = make_page_mock()
+        page.goto = AsyncMock()
+        page.title = AsyncMock(return_value="示例页")
+        tool = BrowserTool(page)
+        obs = await tool.goto("https://example.com")
+        assert obs.success is True
+        assert obs.page_changed is True
+        assert obs.url == "https://example.com"
+        page.goto.assert_awaited_once_with(
+            "https://example.com", timeout=30000, wait_until="load"
+        )
+
+    @pytest.mark.asyncio
+    async def test_goto_failure_returns_fail(self):
+        page, _ = make_page_mock()
+        page.goto = AsyncMock(side_effect=Exception("net::ERR_NAME_NOT_RESOLVED"))
+        tool = BrowserTool(page)
+        obs = await tool.goto("https://bad.example")
+        assert obs.is_error is True
+        assert "导航失败" in obs.error
+
+
+class TestDownload:
+    """download() 下载文件"""
+
+    @pytest.mark.asyncio
+    async def test_download_success_with_save_path(self):
+        page, locator, download = make_download_page_mock()
+        tool = BrowserTool(page)
+        obs = await tool.download("#dl-btn", save_path="out/report.csv")
+        assert obs.success is True
+        assert obs.data["download_path"] == "out/report.csv"
+        download.save_as.assert_awaited_once_with("out/report.csv")
+        locator.click.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_download_default_save_path(self):
+        """未指定 save_path → 保存到当前目录 + suggested_filename"""
+        page, _, download = make_download_page_mock()
+        download.suggested_filename = "auto.csv"
+        tool = BrowserTool(page)
+        obs = await tool.download("#dl-btn")
+        assert obs.success is True
+        assert obs.data["download_path"].endswith("auto.csv")
+
+    @pytest.mark.asyncio
+    async def test_download_failure_returns_fail(self):
+        page, _, _ = make_download_page_mock()
+        page.expect_download = MagicMock(side_effect=Exception("download timed out"))
+        tool = BrowserTool(page)
+        obs = await tool.download("#dl-btn")
+        assert obs.is_error is True
+        assert "下载失败" in obs.error
+
+
+class TestUpload:
+    """upload() 上传文件"""
+
+    @pytest.mark.asyncio
+    async def test_upload_success(self):
+        page, locator = make_page_mock()
+        locator.set_input_files = AsyncMock()
+        tool = BrowserTool(page)
+        obs = await tool.upload("#file", "C:/tmp/a.txt")
+        assert obs.success is True
+        locator.wait_for.assert_awaited()
+        locator.set_input_files.assert_awaited_once_with("C:/tmp/a.txt")
+
+    @pytest.mark.asyncio
+    async def test_upload_failure_returns_fail(self):
+        page, locator = make_page_mock()
+        locator.set_input_files = AsyncMock(side_effect=Exception("no such file"))
+        tool = BrowserTool(page)
+        obs = await tool.upload("#file", "C:/tmp/none.txt")
+        assert obs.is_error is True
+        assert "上传失败" in obs.error
+
+
+class TestBackAndRefresh:
+    """back() 后退 / refresh() 刷新"""
+
+    @pytest.mark.asyncio
+    async def test_back_success(self):
+        page, _ = make_page_mock()
+        page.go_back = AsyncMock()
+        tool = BrowserTool(page)
+        obs = await tool.back()
+        assert obs.success is True
+        assert obs.page_changed is True
+        page.go_back.assert_awaited_once_with(wait_until="load")
+
+    @pytest.mark.asyncio
+    async def test_back_failure_returns_fail(self):
+        page, _ = make_page_mock()
+        page.go_back = AsyncMock(side_effect=Exception("no history"))
+        tool = BrowserTool(page)
+        obs = await tool.back()
+        assert obs.is_error is True
+        assert "后退失败" in obs.error
+
+    @pytest.mark.asyncio
+    async def test_refresh_success(self):
+        page, _ = make_page_mock()
+        page.reload = AsyncMock()
+        tool = BrowserTool(page)
+        obs = await tool.refresh()
+        assert obs.success is True
+        assert obs.page_changed is True
+        page.reload.assert_awaited_once_with(wait_until="load")
+
+    @pytest.mark.asyncio
+    async def test_refresh_failure_returns_fail(self):
+        page, _ = make_page_mock()
+        page.reload = AsyncMock(side_effect=Exception("reload failed"))
+        tool = BrowserTool(page)
+        obs = await tool.refresh()
+        assert obs.is_error is True
+        assert "刷新失败" in obs.error
+
+
+class TestScreenshot:
+    """screenshot() 截图"""
+
+    @pytest.mark.asyncio
+    async def test_screenshot_success(self):
+        import base64
+
+        page, _ = make_page_mock()
+        page.screenshot = AsyncMock(return_value=b"\x89PNG-fake-bytes")
+        tool = BrowserTool(page)
+        obs = await tool.screenshot(full_page=False)
+        assert obs.success is True
+        page.screenshot.assert_awaited_once_with(full_page=False)
+        assert base64.b64decode(obs.data["screenshot_base64"]) == b"\x89PNG-fake-bytes"
+
+    @pytest.mark.asyncio
+    async def test_screenshot_failure_returns_fail(self):
+        page, _ = make_page_mock()
+        page.screenshot = AsyncMock(side_effect=Exception("screenshot failed"))
+        tool = BrowserTool(page)
+        obs = await tool.screenshot()
+        assert obs.is_error is True
+        assert "截图失败" in obs.error

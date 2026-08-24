@@ -7,6 +7,7 @@ LLM Client 抽象测试（V0.3 阶段 A）
 - 错误分类：可重试（超时/网络/限流）与不可重试（内容错误）
 """
 
+import asyncio
 import os
 import sys
 
@@ -214,6 +215,27 @@ class TestOpenAILLMClientProvider:
         assert resolve_api_key_env("moonshot") == "MOONSHOT_API_KEY"
         assert resolve_api_key_env(None) == "OPENAI_API_KEY"
         assert resolve_api_key_env("not-a-provider") == "OPENAI_API_KEY"
+
+    def test_empty_choices_raises_invalid_response(self, monkeypatch, fake_openai):
+        """M1：兼容端点返回空 choices 时映射为 LLMInvalidResponseError（不击穿主循环）"""
+        class _FakeResp:
+            choices = []  # 空 choices：结构异常
+
+        class _FakeCompletions:
+            async def create(self, **kwargs):
+                return _FakeResp()
+
+        class _FakeChat:
+            completions = _FakeCompletions()
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-dummy")
+        client = OpenAILLMClient()
+        client._client.chat = _FakeChat()
+
+        with pytest.raises(LLMInvalidResponseError, match="结构异常"):
+            asyncio.run(client.complete_json(
+                system_prompt="s", user_prompt="u", schema={}, timeout=1000,
+            ))
 
     def test_provider_presets_are_complete(self):
         from agent.llm import PROVIDER_PRESETS

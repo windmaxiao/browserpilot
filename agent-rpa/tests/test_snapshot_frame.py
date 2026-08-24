@@ -63,7 +63,7 @@ async def test_clickable_empty_text_fallback_to_attribute(page):
     target = next((it for it in buttons if "data-source" in it.attributes), None)
     assert target is not None, "空文本可点击入口应被识别"
     assert target.text == "data-source=10000381"  # text 回退属性值，供 LLM 引用
-    assert target.selector == 'span[data-source="10000381"]'  # selector 用属性定位
+    assert target.selector == 'span[data-source="10000381"]:visible'  # selector 用属性定位
     assert target.attributes.get("data-source") == "10000381"
 
 

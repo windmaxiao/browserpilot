@@ -231,7 +231,14 @@ class OpenAILLMClient:
         except Exception as e:
             raise self._map_error(e) from e
 
-        content = (resp.choices[0].message.content or "").strip()
+        # M1：choices 提取同样可能抛异常（部分兼容端点返回空 choices 或结构异常），
+        # 统一映射为不可重试的 LLMInvalidResponseError，避免击穿 Agent 主循环。
+        try:
+            content = (resp.choices[0].message.content or "").strip()
+        except (IndexError, AttributeError, TypeError) as e:
+            raise LLMInvalidResponseError(
+                f"模型返回结构异常（无可用 choices/content）: {type(e).__name__}"
+            ) from e
         try:
             data = json.loads(content)
         except json.JSONDecodeError as e:

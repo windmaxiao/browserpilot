@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from agent.core.executor import Executor, _HTML_TAGS
-from agent.schema.action import Action, click, goto, input_text
+from agent.schema.action import Action, click, goto, input_text, scroll
 from agent.schema.observation import Observation
 
 
@@ -24,6 +24,17 @@ def mock_tool():
         return_value=Observation.ok(url="https://example.com", title="Example")
     )
     tool.wait = AsyncMock(return_value=Observation.ok())
+    tool.select = AsyncMock(return_value=Observation.ok())
+    tool.scroll = AsyncMock(return_value=Observation.ok())
+    tool.download = AsyncMock(
+        return_value=Observation.ok(data={"download_path": "out.csv"})
+    )
+    tool.upload = AsyncMock(return_value=Observation.ok())
+    tool.back = AsyncMock(return_value=Observation.ok())
+    tool.refresh = AsyncMock(return_value=Observation.ok())
+    tool.screenshot = AsyncMock(
+        return_value=Observation.ok(data={"screenshot_base64": "fake"})
+    )
     tool.current_url = "https://example.com"
     tool.current_title = AsyncMock(return_value="Example")
     return tool
@@ -333,3 +344,174 @@ class TestTargetIdResolution:
         # 验证使用了 :has-text() fallback
         args, _ = tool.click.call_args
         assert 'has-text' in args[0] or ':' in args[0]
+
+
+# ── C4: 补 7 个未测试处理器（select/scroll/download/upload/back/refresh/screenshot）──
+
+class TestExtraHandlers:
+    """select/scroll/download/upload/back/refresh/screenshot 处理器"""
+
+    @pytest.mark.asyncio
+    async def test_execute_select(self, mock_tool):
+        executor = Executor(mock_tool)
+        obs = await executor.execute(Action(action="select", target="城市", value="北京"))
+        assert obs.success is True
+        mock_tool.select.assert_awaited_once_with(
+            ':has-text("城市")', "北京", timeout=5000, frame_path=()
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_select_missing_value_fails(self, mock_tool):
+        executor = Executor(mock_tool)
+        obs = await executor.execute(Action(action="select", target="城市"))
+        assert obs.is_error is True
+        assert "value" in obs.error
+        mock_tool.select.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_execute_scroll(self, mock_tool):
+        executor = Executor(mock_tool)
+        obs = await executor.execute(scroll("bottom", 0))
+        assert obs.success is True
+        mock_tool.scroll.assert_awaited_once_with(direction="bottom", amount=0)
+
+    @pytest.mark.asyncio
+    async def test_execute_scroll_defaults(self, mock_tool):
+        executor = Executor(mock_tool)
+        obs = await executor.execute(Action(action="scroll"))
+        assert obs.success is True
+        mock_tool.scroll.assert_awaited_once_with(direction="down", amount=300)
+
+    @pytest.mark.asyncio
+    async def test_execute_download(self, mock_tool):
+        executor = Executor(mock_tool)
+        action = Action(action="download", target="导出", params={"save_path": "out.csv"})
+        obs = await executor.execute(action)
+        assert obs.success is True
+        mock_tool.download.assert_awaited_once_with(
+            ':has-text("导出")',
+            save_path="out.csv",
+            timeout=30000,
+            frame_path=(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_download_missing_target_fails(self, mock_tool):
+        executor = Executor(mock_tool)
+        obs = await executor.execute(Action(action="download"))
+        assert obs.is_error is True
+        mock_tool.download.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_execute_upload(self, mock_tool):
+        executor = Executor(mock_tool)
+        action = Action(action="upload", target="上传", value="C:/tmp/a.txt")
+        obs = await executor.execute(action)
+        assert obs.success is True
+        mock_tool.upload.assert_awaited_once_with(
+            ':has-text("上传")', "C:/tmp/a.txt", timeout=10000, frame_path=()
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_upload_missing_value_fails(self, mock_tool):
+        executor = Executor(mock_tool)
+        obs = await executor.execute(Action(action="upload", target="上传"))
+        assert obs.is_error is True
+        assert "value" in obs.error
+        mock_tool.upload.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_execute_back(self, mock_tool):
+        executor = Executor(mock_tool)
+        obs = await executor.execute(Action(action="back"))
+        assert obs.success is True
+        mock_tool.back.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_execute_refresh(self, mock_tool):
+        executor = Executor(mock_tool)
+        obs = await executor.execute(Action(action="refresh"))
+        assert obs.success is True
+        mock_tool.refresh.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_execute_screenshot_default_full_page(self, mock_tool):
+        executor = Executor(mock_tool)
+        obs = await executor.execute(Action(action="screenshot"))
+        assert obs.success is True
+        mock_tool.screenshot.assert_awaited_once_with(full_page=True)
+
+    @pytest.mark.asyncio
+    async def test_execute_screenshot_full_page_false(self, mock_tool):
+        executor = Executor(mock_tool)
+        obs = await executor.execute(
+            Action(action="screenshot", params={"full_page": False})
+        )
+        assert obs.success is True
+        mock_tool.screenshot.assert_awaited_once_with(full_page=False)
+
+
+class TestExtraHandlersFramePath:
+    """select/download/upload 处理器对 iframe frame_path 的透传（target_id 命中）"""
+
+    @pytest.mark.asyncio
+    async def test_execute_select_with_frame_path(self):
+        tool = MagicMock()
+        tool.select = AsyncMock(return_value=Observation.ok())
+        exec = Executor(tool)
+        snap = MagicMock()
+        el = MagicMock(
+            element_id="e5", selector="select#province", frame_path=("#outer",)
+        )
+        snap.get_interactive_elements.return_value = [el]
+
+        action = Action(action="select", target_id="e5", value="广东")
+        obs = await exec.execute(action, snapshot=snap)
+
+        assert obs.success is True
+        tool.select.assert_awaited_once_with(
+            "select#province", "广东", timeout=5000, frame_path=("#outer",)
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_upload_with_frame_path(self):
+        tool = MagicMock()
+        tool.upload = AsyncMock(return_value=Observation.ok())
+        exec = Executor(tool)
+        snap = MagicMock()
+        el = MagicMock(
+            element_id="e6", selector="#file-input", frame_path=("#outer",)
+        )
+        snap.get_interactive_elements.return_value = [el]
+
+        action = Action(action="upload", target_id="e6", value="C:/tmp/a.txt")
+        obs = await exec.execute(action, snapshot=snap)
+
+        assert obs.success is True
+        tool.upload.assert_awaited_once_with(
+            "#file-input", "C:/tmp/a.txt", timeout=10000, frame_path=("#outer",)
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_download_with_frame_path(self):
+        tool = MagicMock()
+        tool.download = AsyncMock(
+            return_value=Observation.ok(data={"download_path": "out.csv"})
+        )
+        exec = Executor(tool)
+        snap = MagicMock()
+        el = MagicMock(
+            element_id="e7", selector="#dl-btn", frame_path=("#outer", "#inner")
+        )
+        snap.get_interactive_elements.return_value = [el]
+
+        action = Action(action="download", target_id="e7")
+        obs = await exec.execute(action, snapshot=snap)
+
+        assert obs.success is True
+        tool.download.assert_awaited_once_with(
+            "#dl-btn",
+            save_path=None,
+            timeout=30000,
+            frame_path=("#outer", "#inner"),
+        )

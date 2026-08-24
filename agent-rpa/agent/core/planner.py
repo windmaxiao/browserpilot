@@ -827,16 +827,19 @@ _NUM_UNIT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(秒|s|毫秒|ms)")
 
 
 def _cn_int(text: str) -> int:
-    """中文数字 → 整数（支持 1~99：五=5、十=10、十五=15、二十=20、二十五=25）。"""
+    """中文数字 → 整数（支持 1~99：五=5、十=10、十五=15、二十=20、二十五=25）。
+
+    M2：正则允许任意组合（如"一二秒"），非法组合用 .get 回退 0，避免 KeyError 击穿拆解。
+    """
     if not text:
         return 0
     if "十" not in text:
-        return _CN_DIGITS[text]
+        return _CN_DIGITS.get(text, 0)
     if text == "十":
         return 10
     head, _, tail = text.partition("十")
-    tens = _CN_DIGITS[head] if head else 1
-    ones = _CN_DIGITS[tail] if tail else 0
+    tens = _CN_DIGITS.get(head, 0) if head else 1
+    ones = _CN_DIGITS.get(tail, 0) if tail else 0
     return tens * 10 + ones
 
 
@@ -852,7 +855,9 @@ def _extract_wait_ms(description: str) -> Optional[int]:
         return int(num * 1000) if m.group(2) in ("秒", "s") else int(num)
     m = _CN_SEC_RE.search(text)
     if m:
-        return _cn_int(m.group(1)) * 1000
+        cn_ms = _cn_int(m.group(1))
+        # M2：非法组合（_cn_int 返回 0，如"一二秒"）视为无法提取 → None，走 1000ms 兜底
+        return cn_ms * 1000 if cn_ms else None
     return None
 
 

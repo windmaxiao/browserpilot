@@ -22,6 +22,16 @@ from playwright.async_api import Page
 from agent.schema.snapshot import ElementInfo, Snapshot
 
 
+# 逐元素路径（Mock 回退）的可点击文本选择器排除段（#16）：与批量 JS 路径对齐，
+# 用 CSS :not() 排除已被其他类别提取的元素；closest / cursor:pointer 为
+# JS-only 过滤，Mock 环境无法模拟，此处仅做 CSS 层级粗筛。
+# 定义在模块级：生成器表达式有独立作用域，无法访问类体命名空间（评审 C1）。
+_CLICKABLE_SKIP_NOT = (
+    ":not(button):not(a[href]):not([role='button']):not(input):not(select)"
+    ":not(textarea):not([contenteditable='true']):not([role='textbox'])"
+)
+
+
 class SnapshotGenerator:
     """
     从 Playwright Page 生成 Snapshot。
@@ -67,13 +77,7 @@ class SnapshotGenerator:
         "button, a[href], [role='button'], input, select, textarea, "
         "[contenteditable='true'], [role='textbox']"
     )
-    # 逐元素路径（Mock 回退）的可点击文本选择器（#16）：与批量 JS 路径对齐，
-    # 用 CSS :not() 排除已被其他类别提取的元素；closest / cursor:pointer 为
-    # JS-only 过滤，Mock 环境无法模拟，此处仅做 CSS 层级粗筛。
-    _CLICKABLE_SKIP_NOT = (
-        ":not(button):not(a[href]):not([role='button']):not(input):not(select)"
-        ":not(textarea):not([contenteditable='true']):not([role='textbox'])"
-    )
+    # 逐元素路径（Mock 回退）的可点击文本选择器（#16）：排除段见模块级 _CLICKABLE_SKIP_NOT
     SELECTOR_CLICKABLE_ALONE = ",".join(
         f"{tag}{_CLICKABLE_SKIP_NOT}" for tag in ("p", "span", "div", "li", "td", "label")
     )
@@ -118,6 +122,16 @@ class SnapshotGenerator:
         "  .map((el) => extract(el)).filter(Boolean);"
         " const CLICKABLE_ATTRS = ['onclick','gcode','data-source','data-id',"
         "   'data-code','data-action'];"
+        " /* 空文本入口（如 ERP 系统 span[data-source]）无宽高但应视为可见：" 
+        " 与逐元素路径 is_visible() 语义对齐（仅排除 display/visibility 隐藏，" 
+        " 不要求 rect 有宽高），否则这类入口在批量路径被丢弃（评审暴露） */"
+        " const clickableExtract = (el) => {"
+        "  const d = extract(el);"
+        "  if (!d) return null;"
+        "  const cs = getComputedStyle(el);"
+        "  d.visible = cs.visibility !== 'hidden' && cs.display !== 'none';"
+        "  return d;"
+        " };"
         " const clickables = Array.from(document.querySelectorAll("
         + json.dumps(SELECTOR_CLICKABLE) + ")).filter((el) => {"
         "  try {"
@@ -130,7 +144,7 @@ class SnapshotGenerator:
         "   if (tag === 'div' || tag === 'td') return false;"
         "   return getComputedStyle(el).cursor === 'pointer';"
         "  } catch (e) { return true; }"
-        " }).slice(0, " + str(_CLICKABLE_MAX) + ").map((el) => extract(el)).filter(Boolean)"
+        " }).slice(0, " + str(_CLICKABLE_MAX) + ").map(clickableExtract).filter(Boolean)"
         "  .map((d) => {"
         "   if (!d || d.text) return d;"
         "   const attr = CLICKABLE_ATTRS.find((k) => d.attrs[k]);"
@@ -313,12 +327,14 @@ class SnapshotGenerator:
         result = []
         tag_index: dict[str, int] = {}
         for seg, tag in zip(base, tags):
+            # 按标签无条件递增（无论该元素最终用语义段还是位置段）：
+            # nth 必须在同标签的全部元素中按 DOM 顺序计数，否则"有 id 的
+            # iframe 排在无 id 之前"时位置段索引会偏小、指向错误帧（评审 C3）。
+            tag_index[tag] = tag_index.get(tag, 0) + 1
             if seg is not None and counts[seg] == 1:
                 result.append(seg)
             else:
-                n = tag_index.get(tag, 0)
-                tag_index[tag] = n + 1
-                result.append(f"{tag} >> nth={n}")
+                result.append(f"{tag} >> nth={tag_index[tag] - 1}")
         return result
 
     @staticmethod

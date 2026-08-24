@@ -124,7 +124,7 @@ class Agent:
         except asyncio.TimeoutError:
             logger.warning("⏱️ 任务超时（{:.0f}s）终止 | goal: {}", timeout_seconds, goal)
             return Observation.fail(
-                error=f"任务执行超过 {timeout_seconds:g} 秒，已终止",
+                error=f"任务执行超过 {timeout_seconds:g} 秒，已超时终止",
             )
 
     async def _run_body(self, goal: str) -> Observation:
