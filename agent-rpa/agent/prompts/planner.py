@@ -17,7 +17,12 @@ import json
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
-from agent.schema.action import Action, NEEDS_TARGET, VALID_ACTIONS
+from agent.schema.action import (
+    Action,
+    NEEDS_TARGET,
+    VALID_ACTIONS,
+    is_path_within_allowed,
+)
 from agent.schema.snapshot import ElementInfo, Snapshot
 
 
@@ -398,6 +403,7 @@ def parse_action_dict(
     snapshot: Snapshot,
     *,
     allow_selector: bool = False,
+    allowed_upload_dirs: Optional[list] = None,
 ) -> Action:
     """将模型输出的 dict 安全转换为已验证的 Action。
 
@@ -411,6 +417,9 @@ def parse_action_dict(
       可读文本写入 ``target``。
     - 不需要元素的动作（goto/scroll/wait/back/refresh/screenshot/done）
       不要求 target_id。
+    - M5：模型不得指定下载落盘路径（download 的 save_path 一律剥离）；
+      upload 必须显式允许（``allowed_upload_dirs`` 未配置则拒绝，配置后
+      value 须落在允许目录内），防止恶意页面诱导模型读写任意文件。
     - 返回的 Action 已通过 ``Action.validate()``；失败抛 ActionParseError。
     """
     if not isinstance(data, dict):
@@ -439,6 +448,19 @@ def parse_action_dict(
     if not allow_selector:
         params.pop("selector", None)
 
+    # M5：模型不得决定下载落盘路径（save_path 与 selector 同一白名单策略），
+    # 落盘目录只由调用方策略（Executor.download_dir）注入
+    if action_name == "download":
+        params.pop("save_path", None)
+
+    # M5：upload 必须显式允许 —— 未配置允许目录一律拒绝；配置后 value
+    # 须落在允许目录内（防恶意页面诱导模型上传本地敏感文件）
+    if action_name == "upload" and value:
+        if not is_path_within_allowed(value, allowed_upload_dirs):
+            raise ActionParseError(
+                f"upload 文件路径越权（未显式允许）: {value!r}"
+            )
+
     if action_name in NEEDS_TARGET:
         element = find_element_by_id(snapshot, target_id) if target_id else None
         if target_id and element is None:
@@ -462,7 +484,12 @@ def parse_action_dict(
     return action
 
 
-def parse_action_list(data: Any, snapshot: Snapshot) -> list[Action]:
+def parse_action_list(
+    data: Any,
+    snapshot: Snapshot,
+    *,
+    allowed_upload_dirs: Optional[list] = None,
+) -> list[Action]:
     """将模型输出的混合 dict 转换为已验证的 Action 列表（V1.0 批量增强 hybrid）。
 
     兼容两种输出（build_hybrid_schema 的 anyOf）：
@@ -484,7 +511,9 @@ def parse_action_list(data: Any, snapshot: Snapshot) -> list[Action]:
         parsed: list[Action] = []
         for item in actions:
             try:
-                parsed.append(parse_action_dict(item, snapshot))
+                parsed.append(parse_action_dict(
+                    item, snapshot, allowed_upload_dirs=allowed_upload_dirs,
+                ))
             except ActionParseError:
                 continue
         if not parsed:
@@ -492,4 +521,6 @@ def parse_action_list(data: Any, snapshot: Snapshot) -> list[Action]:
         return parsed
 
     # anyOf 方案一：单个动作
-    return [parse_action_dict(data, snapshot)]
+    return [parse_action_dict(
+        data, snapshot, allowed_upload_dirs=allowed_upload_dirs,
+    )]

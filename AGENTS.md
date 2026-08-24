@@ -326,7 +326,7 @@ class Agent:
 - **失败自动重试（V0.4）**：机械重试 1 次 → Reflection（LLM 分析失败给出替代动作）1 次 → 仍失败尝试页面恢复（back/refresh）→ 仍失败中止任务
 - Planner 返回 None 表示无法规划
 - **异常防护**：`_safe_observe()` / `_safe_execute()` 捕获浏览器关闭等异常，优雅返回失败 Observation 而非崩溃
-- **停滞检测**：自由模式连续 2 次 wait 且页面无变化 → 提前终止；计划内 wait 步骤不计入（步骤模式不做该检测，队列必然推进）
+- **停滞检测**：自由模式连续 2 次 wait 且页面无变化 → 提前终止；仅对 `Planner.stagnation_detection=True`（默认）的规划器生效——`RuleBasedPlanner` 覆盖为 `False`（自身用 `_WAIT_MAX_TRIES` 控制等待次数，不被截断）；计划内 wait 步骤不计入（步骤模式不做该检测，队列必然推进）
 - **重复动作检测（V1.0 批量增强）**：页面未变化时连续对同一目标执行相同动作（input/click/select/scroll），连续 `_MAX_REPEAT_SKIPS=3` 次即判停滞终止，防止 LLM 反复填同一字段
 - **iframe 定位与恢复（V1.0 子计划 A）**：`ElementInfo` 携带 `frame_path`（元组，空为主页面）；Executor 维护 `element_id → (selector, frame_path)` 映射并向 BrowserTool 透传；`target_id` 命中时优先于注入的 `params["selector"]`；frame 失效后旧路径作废，需重新 Observe 再解析 `target_id`
 - **历史记忆（V0.5）**：每步经 `_record_step()` 写入原始历史与 `HistoryMemory`，`plan_with_history` / `plan_step` / `reflect` 传 `memory.context_entries()`（摘要 + 最近窗口）而非原始全量历史
@@ -335,10 +335,14 @@ class Agent:
 
 ```python
 class Executor:
-    def __init__(self, browser_tool: BrowserTool)
+    def __init__(self, browser_tool: BrowserTool,
+                 *, download_dir=None, allowed_upload_dirs=None)
 ```
 
 - `execute(action)` — 分发表：action.type → handler
+- `download_dir` / `allowed_upload_dirs`（M5 文件路径策略，可选）：
+  - `download_dir`：download 落盘目录（模型无法指定 save_path，parse 层已剥离）；未提供时 BrowserTool 默认落盘当前目录 + 服务器文件名
+  - `allowed_upload_dirs`：upload 文件所在目录白名单；**未配置则 upload 动作一律拒绝**（默认最严格），配置后 value 须落在允许目录内
 - `_resolve_selector(target, params)` — 优先级：
   1. `params["selector"]` 显式指定
   2. CSS 选择器风格（以 `#`, `.`, `[`, `:` 开头）
@@ -363,9 +367,9 @@ class Observer:
 | 类/函数 | 说明 |
 |----|------|
 | `parse_goal(goal)` | 从目标提取 URL / 搜索词 / 点击目标 / 等待条件 → TaskSpec |
-| `Planner` | 基类，`plan()` 抛出 NotImplementedError；`plan_with_history()` 默认转发 plan；`plan_batch()` 默认退化为单动作（V1.0 批量增强）；`decompose()` 默认返回 None（自由模式）；`plan_step()` 默认退化为 plan_with_history；`reflect()` 默认返回 None（不支持 Reflection）；`on_action_result()` / `reset()` 默认 no-op |
-| `RuleBasedPlanner` | 规则引擎（V0.2 完成）：8 条内置规则 + `add_rule()` 自定义规则优先 |
-| `LLMPlanner` | LLM 规划器（V0.3 完成，自由模式）：Snapshot 序列化 → 提示词 → 模型输出 → 安全 Action 转换；内容层错误最多一次修复；`reflect()` 失败反思（V0.4） |
+| `Planner` | 基类，`plan()` 抛出 NotImplementedError；`plan_with_history()` 默认转发 plan；`plan_batch()` 默认退化为单动作（V1.0 批量增强）；`decompose()` 默认返回 None（自由模式）；`plan_step()` 默认退化为 plan_with_history；`reflect()` 默认返回 None（不支持 Reflection）；`on_action_result()` / `reset()` 默认 no-op；`stagnation_detection=True`（M4，停滞检测开关）。**history 契约（V0.5 Memory breaking change）：** `plan_with_history`/`plan_step`/`reflect` 收到的 history 可能含 `{"kind":"summary","text":...}` 头部条目，应经 `prompts.serialize_history` 渲染或自行兼容 |
+| `RuleBasedPlanner` | 规则引擎（V0.2 完成）：8 条内置规则 + `add_rule()` 自定义规则优先；`stagnation_detection=False`（M4，自身用 `_WAIT_MAX_TRIES` 控制等待） |
+| `LLMPlanner` | LLM 规划器（V0.3 完成，自由模式）：Snapshot 序列化 → 提示词 → 模型输出 → 安全 Action 转换；内容层错误最多一次修复；`reflect()` 失败反思（V0.4）；`allowed_upload_dirs`（M5，可选，未配置时模型输出 upload 动作被拒绝） |
 | `TaskStep` / `TaskQueue` | 任务步骤数据模型与队列（V0.4 前瞻）：kind ∈ action/wait/verify；wait/verify 由框架直接执行 |
 | `TaskPlanner` | 两阶段规划器（V0.4 前瞻）：`decompose()` 一次 LLM 调用把目标拆成步骤队列 + `plan_step()` 提示词携带「当前步骤 + 剩余步骤」分步决策；拆解失败自动回退自由模式 |
 
@@ -446,7 +450,7 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 | `parse_action_dict()` | 模型 dict → 已验证 Action：伪造 selector 忽略、target_id 必须命中、未知字段丢弃 |
 | `BATCH_SYSTEM_PROMPT` / `build_hybrid_schema()` / `parse_action_list()` | 批量规划（V1.0 自由模式增强）：导航/跳转场景输出单 Action、表单场景输出 `{"actions":[...]}`（最多 10 个）；解析兼容单/批量两种输出 |
 
-**安全边界（模型不能越界）：** 模型只看到 `target_id` 与语义字段；可执行 selector 只由本地 Snapshot 映射注入；幻觉 ID、非法 action、伪造 selector 一律在进入 Executor 前被拦截。
+**安全边界（模型不能越界）：** 模型只看到 `target_id` 与语义字段；可执行 selector 只由本地 Snapshot 映射注入；幻觉 ID、非法 action、伪造 selector 一律在进入 Executor 前被拦截；**M5 文件路径策略**：模型不得指定下载落盘路径（download 的 `save_path` 在 parse 层剥离，落盘目录由 `Executor.download_dir` 配置）；upload 必须显式允许（`allowed_upload_dirs` 未配置即拒绝，配置后 value 须落在允许目录内，Executor 二次校验为防御纵深）。
 
 ---
 
@@ -475,6 +479,8 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 - ✅ **iframe 支持（V1.0 子计划 A）**：`ElementInfo` 新增 `frame_path`（元组，空为主页面）；`SnapshotGenerator` 递归遍历多层 iframe（`_iter_scopes`/`_walk_scopes`/`_frame_segments`，重复 id/name 用位置 `nth=j` 消歧，子 frame 加载有限超时跳过）；`Executor` 构建 `element_id → frame_path` 映射（target_id 优先于注入 selector）；`BrowserTool._locator` 逐层 `frame_locator` 穿透；frame 失效后重新 Observe 再解析；真实 Playwright 浏览器三层 iframe fixture 测试（`test_snapshot_frame.py`）
 - ✅ **Memory（V0.5）**：`HistoryMemory` 增量式历史记忆（滚动摘要：超出窗口的旧条目按批折叠，默认 `window=5, batch=10`，可注入异步 LLM 摘要器）、`summarize_entries()` 规则式摘要（不含输入值/URL 等敏感内容）、上下文压缩（`context_entries()` = 摘要 + 最近窗口，摘要不占窗口名额）、`serialize_history` / `build_user_prompt` 摘要协议、Agent `_record_step()` 同步记录 + `plan_with_history` / `plan_step` / `reflect` 传压缩上下文
 - ✅ **批量规划（V1.0 自由模式增强）**：`plan_batch()` 一次 LLM 返回最多 10 个动作（`BATCH_SYSTEM_PROMPT` / `build_hybrid_schema` 混合 schema / `parse_action_list` 兼容单/批量输出），同 Snapshot 连续执行、任一失败/页面变化/done 即断批；`Planner.plan_batch` 默认退化为单动作保证兼容；**重复动作检测**（页面未变化时连续 `_MAX_REPEAT_SKIPS=3` 次相同动作判停滞）；**`run(goal, timeout_seconds)`** 墙钟超时兜底
+- ✅ **接口契约加固（M4，2026-08-24 评审修复）**：自由模式 `plan_batch` 改 `getattr` 逐级回退（`plan_batch → plan_with_history → plan`），V0.3 鸭子类型 Planner 不再崩溃；基类声明 history 摘要条目契约（breaking change）；停滞检测按 `Planner.stagnation_detection` 启用（`RuleBasedPlanner` 覆盖 `False`，`_WAIT_MAX_TRIES=10` 不再被截断）
+- ✅ **文件路径安全（M5，2026-08-24 评审修复）**：`parse_action_dict` 剥离模型 download `save_path`（落盘目录由 `Executor.download_dir` 配置）；upload 强制目录白名单（`allowed_upload_dirs` 未配置即拒绝、`LLMPlanner` 透传、Executor 二次校验）；`schema/action.py` 新增纯函数 `is_path_within_allowed`
 - ✅ 16 个测试文件，400+ 个用例（Schema / Executor / Planner / BrowserTool / SnapshotGenerator / Snapshot iframe / Agent 集成 / LLMClient / 序列化 / LLMPlanner / Memory / Logging / TaskQueue）
 - ✅ 5 个 Demo（手动 / 规则 Agent 本地页 / 规则 Agent 百度 / LLM Agent 自由模式 / LLM Agent 两阶段真实百度，端到端跑通）+ 1 个业务示例（`examples/ex_robot/ydgx`：LLM 局部辅助 + 多层 iframe + 失败回退确定性，不入 git）
 
@@ -485,7 +491,7 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 | 1 | texts 含 span 噪音 | 🟡 | 暂不处理 |
 | — | 规则 7「点击首条结果」非死代码，设计取舍保留（本文件自管，未入 待解决问题.md） | 🟡 | 🔒 保留 |
 
-> 完整列表见 [待解决问题.md](待解决问题.md)：当前跟踪 2 项（🟡 1、🟢 1），已解决条目随修复移除，编号不复用（#16-#25 为 2026-08 增补，其中 #10-#19/#21/#22/#24、#6、#7、#8、#23、#25 已修复，#20 确认保留；2026-08-24 修复步骤模式 wait 重试与手动 step()/observe() 防护后，待解决问题.md 原 #3/#4 已移除）。
+> 完整列表见 [待解决问题.md](待解决问题.md)：当前跟踪 2 项（🟡 1、🟢 1），已解决条目随修复移除，编号不复用（#16-#25 为 2026-08 增补，其中 #10-#19/#21/#22/#24、#6、#7、#8、#23、#25 已修复，#20 确认保留；2026-08-24 修复步骤模式 wait 重试与手动 step()/observe() 防护后，待解决问题.md 原 #3/#4 已移除；同日按 qwen38审查问题.md 修复 C1-C4/M1-M3，以及 M4 接口契约加固与 M5 文件路径安全）。
 
 ---
 

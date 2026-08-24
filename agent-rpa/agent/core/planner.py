@@ -116,7 +116,18 @@ def parse_goal(goal: str) -> TaskSpec:
 # ═══════════════════════════════════════════════════════════════
 
 class Planner:
-    """规划器基类（V0.2 由 RuleBasedPlanner 实现，V0.3 由 LLMPlanner 实现）。"""
+    """规划器基类（V0.2 由 RuleBasedPlanner 实现，V0.3 由 LLMPlanner 实现）。
+
+    ``history`` 参数契约（V0.5 Memory breaking change）：``plan_with_history`` /
+    ``plan_step`` / ``reflect`` 收到的 history 可能含 ``{"kind": "summary", "text": ...}``
+    头部条目（:class:`HistoryMemory` 产出），应经 :func:`prompts.planner.serialize_history`
+    渲染或自行兼容；直接按 ``entry["action"]`` 遍历的旧实现需适配。
+    """
+
+    # 自由模式停滞检测开关（M4）：为 True 时 Agent 会在连续 2 次 wait 且页面
+    # 无变化时判定任务停滞并终止。规划器可覆盖为 False 表示自身控制等待次数
+    # （如 RuleBasedPlanner 的 _WAIT_MAX_TRIES），避免被通用检测截断。
+    stagnation_detection = True
 
     async def plan(self, snapshot: Snapshot, goal: str) -> Optional[Action]:
         raise NotImplementedError("Planner.plan() 未实现")
@@ -229,6 +240,9 @@ class RuleBasedPlanner(Planner):
     """
 
     _SEARCH_BUTTON_TEXTS = ("搜索", "查找", "查询", "百度一下", "Search", "Go")
+    # M4：规则型规划器的 wait 由自身 _WAIT_MAX_TRIES 控制，
+    # 不被自由模式停滞检测（连续 2 次）截断
+    stagnation_detection = False
     _WAIT_MAX_TRIES = 10
     _WAIT_MS = 800
 
@@ -510,6 +524,7 @@ class LLMPlanner(Planner):
         llm_retries: int = 5,
         llm_retry_delay: float = 2.0,
         llm_retry_max_delay: float = 16.0,
+        allowed_upload_dirs: Optional[list] = None,
     ):
         self._client = client
         self._model = model
@@ -519,6 +534,8 @@ class LLMPlanner(Planner):
         self._llm_retries = llm_retries
         self._llm_retry_delay = llm_retry_delay
         self._llm_retry_max_delay = llm_retry_max_delay
+        # M5：upload 文件路径白名单（未配置则模型输出 upload 动作被拒绝）
+        self._allowed_upload_dirs = allowed_upload_dirs
 
     @property
     def model(self) -> str:
@@ -596,7 +613,9 @@ class LLMPlanner(Planner):
             return None
         for attempt in range(self._max_repair_attempts + 1):
             try:
-                actions = parse_action_list(raw, snapshot)
+                actions = parse_action_list(
+                    raw, snapshot, allowed_upload_dirs=self._allowed_upload_dirs,
+                )
                 return actions or None
             except ActionParseError as e:
                 logger.warning(
@@ -628,7 +647,9 @@ class LLMPlanner(Planner):
             return None
         for attempt in range(self._max_repair_attempts + 1):
             try:
-                return parse_action_dict(raw, snapshot)
+                return parse_action_dict(
+                    raw, snapshot, allowed_upload_dirs=self._allowed_upload_dirs,
+                )
             except ActionParseError as e:
                 logger.warning(
                     "Action 解析失败（第 {}/{} 次）: {}",
@@ -692,7 +713,9 @@ class LLMPlanner(Planner):
         if raw is None:
             return None
         try:
-            return parse_action_dict(raw, snapshot)
+            return parse_action_dict(
+                raw, snapshot, allowed_upload_dirs=self._allowed_upload_dirs,
+            )
         except ActionParseError as e:
             logger.warning("Reflection 输出无法解析: {}", e)
             return None
@@ -1022,7 +1045,9 @@ class TaskPlanner(LLMPlanner):
             return None
         for attempt in range(self._max_repair_attempts + 1):
             try:
-                return parse_action_dict(raw, snapshot)
+                return parse_action_dict(
+                    raw, snapshot, allowed_upload_dirs=self._allowed_upload_dirs,
+                )
             except ActionParseError as e:
                 logger.warning(
                     "Action 解析失败（第 {}/{} 次）: {}",

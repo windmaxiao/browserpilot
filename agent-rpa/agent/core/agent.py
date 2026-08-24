@@ -162,10 +162,23 @@ class Agent:
             self._log_snapshot(snapshot)
 
             # 2. Plan batch（每批一次 LLM，可返回多个连续动作）
+            # M4：兼容 V0.3 鸭子类型自定义 Planner（未继承基类）——
+            # plan_batch → plan_with_history → plan 逐级回退，避免 AttributeError
             logger.info("📝 [Step {}/{}] 规划动作...", self._current_step + 1, self._max_steps)
-            actions = await self._planner.plan_batch(
-                snapshot, goal, self._memory.context_entries(),
-            )
+            planner = self._planner
+            plan_batch = getattr(planner, "plan_batch", None)
+            if plan_batch is not None:
+                actions = await plan_batch(
+                    snapshot, goal, self._memory.context_entries(),
+                )
+            else:
+                plan_wh = getattr(planner, "plan_with_history", None)
+                action = (
+                    await plan_wh(snapshot, goal, self._memory.context_entries())
+                    if plan_wh is not None
+                    else await planner.plan(snapshot, goal)
+                )
+                actions = [action] if action is not None else None
             if not actions:
                 logger.warning("⚠️  无法规划出有效动作")
                 return Observation.fail(
@@ -248,7 +261,12 @@ class Agent:
                     break
 
                 # 3.4 循环检测：连续等待且页面无变化 → 任务停滞，提前终止
-                if final_action.action == "wait" and not observation.page_changed:
+                # M4：仅对声明启用停滞检测的规划器生效（规则型自行控制等待次数）
+                if (
+                    getattr(self._planner, "stagnation_detection", True)
+                    and final_action.action == "wait"
+                    and not observation.page_changed
+                ):
                     consecutive_waits += 1
                 else:
                     consecutive_waits = 0

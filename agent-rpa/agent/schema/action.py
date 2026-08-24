@@ -8,6 +8,7 @@ Playwright 只是执行器。
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Optional, get_args
@@ -37,6 +38,23 @@ NEEDS_TARGET = frozenset({"click", "select", "download", "upload", "input"})
 
 
 # ── 参数校验辅助函数 ────────────────────────────────────────────────
+
+def is_path_within_allowed(value: str, allowed_dirs) -> bool:
+    """M5 文件路径越权防护：value 解析为绝对路径后是否位于任一允许目录内。
+
+    未配置 allowed_dirs（None / 空）一律返回 False —— 未显式允许的路径拒绝访问。
+    """
+    if not allowed_dirs:
+        return False
+    target = Path(os.path.abspath(os.path.expanduser(str(value))))
+    for d in allowed_dirs:
+        try:
+            target.relative_to(Path(os.path.abspath(os.path.expanduser(str(d)))))
+            return True
+        except ValueError:
+            continue
+    return False
+
 
 def _check_positive_int(params: dict, key: str, errors: list[str]) -> None:
     """校验正整数参数（如 timeout）。未设置时跳过。"""

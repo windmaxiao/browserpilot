@@ -317,6 +317,57 @@ async def test_wait_after_page_change_resets_stagnation_counter():
     assert tool.wait.await_count == 2
 
 
+# ── M4：接口契约漂移 ──────────────────────────────────────────────
+
+class _LegacyDuckPlanner:
+    """V0.3 鸭子类型：仅实现 plan（无基类 / 无 plan_batch / 无 plan_with_history）"""
+
+    def __init__(self, action):
+        self._action = action
+        self.calls = 0
+
+    async def plan(self, snapshot, goal):
+        self.calls += 1
+        return self._action
+
+
+@pytest.mark.asyncio
+async def test_legacy_duck_planner_without_plan_batch_falls_back():
+    """M4：V0.3 鸭子类型 Planner（仅 plan）在自由模式逐级回退，不崩溃"""
+    snapshot = Snapshot(title="测试页", url="https://example.com")
+    observer = MagicMock()
+    observer.observe = AsyncMock(return_value=snapshot)
+    planner = _LegacyDuckPlanner(done())
+    tool = MagicMock()
+    tool.current_url = "https://example.com"
+    tool.current_title = AsyncMock(return_value="测试页")
+
+    agent = Agent(observer, planner, Executor(tool), max_steps=5)
+    obs = await agent.run("完成任务")
+
+    assert obs.success is True
+    assert planner.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_rule_planner_waits_exempt_from_stagnation():
+    """M4：stagnation_detection=False 的规则型规划器，连续 wait 不被停滞检测截断"""
+    agent, planner, tool = make_mocks([
+        Action(action="wait", value="5000"),
+        Action(action="wait", value="5000"),
+        Action(action="wait", value="5000"),
+        done(),
+    ])
+    tool.wait = AsyncMock(return_value=Observation.ok(page_changed=False))
+    planner.stagnation_detection = False  # 规则型：自身用 _WAIT_MAX_TRIES 控制等待
+
+    obs = await agent.run("查找 北京时间")
+
+    assert obs.success is True
+    assert agent.current_step == 4
+    assert tool.wait.await_count == 3
+
+
 # ── 步骤模式（V0.4 前瞻）：任务队列 ─────────────────────────────────
 
 class _StepPlannerStub:

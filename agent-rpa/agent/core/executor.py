@@ -7,12 +7,13 @@ Executor 是 Agent 与 Browser Tool 之间的桥梁。
 
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional
 
 from loguru import logger
 
 from agent.browser.playwright import BrowserTool
-from agent.schema.action import Action
+from agent.schema.action import Action, is_path_within_allowed
 from agent.schema.observation import Observation
 from agent.schema.snapshot import Snapshot
 
@@ -33,8 +34,24 @@ class Executor:
     Action → Executor → Browser Tool → Observation
     """
 
-    def __init__(self, browser_tool: BrowserTool):
+    def __init__(
+        self,
+        browser_tool: BrowserTool,
+        *,
+        download_dir: Optional[str | Path] = None,
+        allowed_upload_dirs: Optional[list] = None,
+    ):
+        """
+        Args:
+            browser_tool: BrowserTool 实例
+            download_dir: 下载落盘目录（M5 调用方策略）。模型无法指定 save_path，
+                未提供时 BrowserTool 默认落盘当前目录 + 服务器文件名
+            allowed_upload_dirs: 允许上传文件所在目录白名单（M5）。未配置时
+                upload 动作一律拒绝，防止模型读取/上传本地任意文件
+        """
         self._tool = browser_tool
+        self._download_dir = download_dir
+        self._allowed_upload_dirs = allowed_upload_dirs
         self._element_map: dict[str, str] = {}
         self._frame_map: dict[str, tuple] = {}
         # 分发表在 __init__ 构建一次（待解决问题 #25），避免每次 execute 重建
@@ -178,7 +195,8 @@ class Executor:
     async def _execute_download(self, action: Action) -> Observation:
         selector = self._resolve_target(action)
         if selector:
-            save_path = action.params.get("save_path")
+            # M5：模型无法指定 save_path（parse 层已剥离），落盘目录取调用方策略
+            save_path = action.params.get("save_path") or self._download_dir
             logger.info("下载文件 → selector: {} | save_path: {}", selector, save_path)
             return await self._tool.download(
                 selector,
@@ -197,6 +215,12 @@ class Executor:
         if not action.value:
             logger.warning("upload 动作缺少 value (file path)")
             return Observation.fail(error="upload 动作缺少 value (file path)")
+        # M5：未显式配置允许上传目录 → 一律拒绝；配置后 value 须落在允许目录内
+        if not is_path_within_allowed(action.value, self._allowed_upload_dirs):
+            logger.warning("upload 文件路径越权或未启用上传: {}", action.value)
+            return Observation.fail(
+                error=f"upload 文件路径越权（未显式允许）: {action.value!r}"
+            )
         selector = self._resolve_target(action)
         if selector:
             logger.info("上传文件 → selector: {} | file: {}", selector, action.value)

@@ -447,3 +447,46 @@ class TestPlanBatch:
         actions = await p.plan_batch(_snapshot(), "点击", [])
         assert actions is not None and len(actions) == 1
         assert actions[0].action == "click"
+
+
+class TestM5FilePathSecurity:
+    """M5：download 剥离模型 save_path / upload 强制目录白名单"""
+
+    def test_download_strips_model_save_path(self):
+        """模型输出的 save_path 一律剥离，落盘路径不由模型决定"""
+        action = parse_action_dict(
+            {"action": "download", "target_id": "e1",
+             "params": {"save_path": "C:/evil/steal.pdf"}},
+            _snapshot(),
+        )
+        assert action.action == "download"
+        assert "save_path" not in action.params
+
+    def test_upload_rejected_without_allowed_dirs(self):
+        """未配置允许上传目录 → upload 动作被拒绝（默认最严格）"""
+        with pytest.raises(ActionParseError):
+            parse_action_dict(
+                {"action": "upload", "target_id": "e1", "value": "C:/tmp/a.txt"},
+                _snapshot(),
+            )
+
+    def test_upload_rejected_outside_allowed_dirs(self):
+        """value 位于允许目录之外 → 拒绝"""
+        with pytest.raises(ActionParseError):
+            parse_action_dict(
+                {"action": "upload", "target_id": "e1", "value": "C:/tmp/a.txt"},
+                _snapshot(),
+                allowed_upload_dirs=["D:/safe"],
+            )
+
+    def test_upload_allowed_within_allowed_dirs(self):
+        """value 在允许目录内 → 放行并注入 selector"""
+        action = parse_action_dict(
+            {"action": "upload", "target_id": "e1", "value": "C:/tmp/a.txt"},
+            _snapshot(),
+            allowed_upload_dirs=["C:/tmp"],
+        )
+        assert action.action == "upload"
+        assert action.value == "C:/tmp/a.txt"
+        assert action.params["selector"] == "#btn-login"
+        assert action.is_valid()

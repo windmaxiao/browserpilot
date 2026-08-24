@@ -396,6 +396,17 @@ class TestExtraHandlers:
         )
 
     @pytest.mark.asyncio
+    async def test_execute_download_uses_configured_download_dir(self, mock_tool):
+        """M5：save_path 缺失时下载落盘到调用方配置的 download_dir"""
+        executor = Executor(mock_tool, download_dir="C:/downloads")
+        action = Action(action="download", target="导出")
+        obs = await executor.execute(action)
+        assert obs.success is True
+        mock_tool.download.assert_awaited_once_with(
+            ':has-text("导出")', save_path="C:/downloads", timeout=30000, frame_path=(),
+        )
+
+    @pytest.mark.asyncio
     async def test_execute_download_missing_target_fails(self, mock_tool):
         executor = Executor(mock_tool)
         obs = await executor.execute(Action(action="download"))
@@ -404,13 +415,34 @@ class TestExtraHandlers:
 
     @pytest.mark.asyncio
     async def test_execute_upload(self, mock_tool):
-        executor = Executor(mock_tool)
+        """M5：配置允许上传目录后，目录内路径正常透传"""
+        executor = Executor(mock_tool, allowed_upload_dirs=["C:/tmp"])
         action = Action(action="upload", target="上传", value="C:/tmp/a.txt")
         obs = await executor.execute(action)
         assert obs.success is True
         mock_tool.upload.assert_awaited_once_with(
             ':has-text("上传")', "C:/tmp/a.txt", timeout=10000, frame_path=()
         )
+
+    @pytest.mark.asyncio
+    async def test_execute_upload_rejected_without_allowed_dirs(self, mock_tool):
+        """M5：未配置允许上传目录 → upload 一律拒绝"""
+        executor = Executor(mock_tool)
+        action = Action(action="upload", target="上传", value="C:/tmp/a.txt")
+        obs = await executor.execute(action)
+        assert obs.is_error is True
+        assert "越权" in obs.error
+        mock_tool.upload.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_execute_upload_path_outside_allowed_fails(self, mock_tool):
+        """M5：value 位于允许目录之外 → 拒绝"""
+        executor = Executor(mock_tool, allowed_upload_dirs=["D:/safe"])
+        action = Action(action="upload", target="上传", value="C:/tmp/a.txt")
+        obs = await executor.execute(action)
+        assert obs.is_error is True
+        assert "越权" in obs.error
+        mock_tool.upload.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_execute_upload_missing_value_fails(self, mock_tool):
@@ -477,7 +509,7 @@ class TestExtraHandlersFramePath:
     async def test_execute_upload_with_frame_path(self):
         tool = MagicMock()
         tool.upload = AsyncMock(return_value=Observation.ok())
-        exec = Executor(tool)
+        exec = Executor(tool, allowed_upload_dirs=["C:/tmp"])
         snap = MagicMock()
         el = MagicMock(
             element_id="e6", selector="#file-input", frame_path=("#outer",)
