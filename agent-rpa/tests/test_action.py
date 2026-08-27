@@ -2,6 +2,10 @@
 Action Schema 单元测试
 """
 
+import os
+
+import pytest
+
 from agent.schema.action import (
     Action,
     click,
@@ -195,3 +199,34 @@ def test_factory_functions():
     a = done("任务完成")
     assert a.action == "done"
     assert a.value == "任务完成"
+
+
+# ── M5 文件路径越权防护（is_path_within_allowed）────────────────────
+
+def test_is_path_within_allowed_default_deny():
+    """未配置 allowed_dirs 一律拒绝（默认拒绝语义）"""
+    from agent.schema.action import is_path_within_allowed
+
+    assert not is_path_within_allowed("/tmp/a.pdf", None)
+    assert not is_path_within_allowed("/tmp/a.pdf", [])
+
+
+def test_is_path_within_allowed_symlink_escape(tmp_path):
+    """允许目录内的符号链接指向外部目录时必须被拒（原待解决问题 #1 回归）"""
+    from agent.schema.action import is_path_within_allowed
+
+    real_dir = tmp_path / "real"      # 白名单外真实目录
+    allowed = tmp_path / "allowed"    # 允许目录
+    real_dir.mkdir()
+    allowed.mkdir()
+
+    link = allowed / "jump"           # 白名单内链接 → 指向白名单外
+    try:
+        os.symlink(real_dir, link, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前环境无符号链接创建权限，跳过")
+
+    # 通过白名单内链接触达外部文件 → 拒绝
+    assert not is_path_within_allowed(str(link / "f.txt"), [str(allowed)])
+    # 白名单内普通路径不受影响 → 放行
+    assert is_path_within_allowed(str(allowed / "a.txt"), [str(allowed)])

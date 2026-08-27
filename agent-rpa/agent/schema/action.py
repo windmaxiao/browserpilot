@@ -8,7 +8,6 @@ Playwright 只是执行器。
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Optional, get_args
@@ -42,16 +41,23 @@ NEEDS_TARGET = frozenset({"click", "select", "download", "upload", "input"})
 def is_path_within_allowed(value: str, allowed_dirs) -> bool:
     """M5 文件路径越权防护：value 解析为绝对路径后是否位于任一允许目录内。
 
-    未配置 allowed_dirs（None / 空）一律返回 False —— 未显式允许的路径拒绝访问。
+    使用 Path.resolve() 规范化路径并解析符号链接 / Windows junction，
+    防止允许目录内的链接指向外部目录而绕过白名单。
+    未配置 allowed_dirs（None / 空）一律返回 False —— 未显式允许的路径拒绝访问；
+    路径解析失败时同样保守返回 False，保持默认拒绝语义。
     """
     if not allowed_dirs:
         return False
-    target = Path(os.path.abspath(os.path.expanduser(str(value))))
+    try:
+        target = Path(str(value)).expanduser().resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
     for d in allowed_dirs:
         try:
-            target.relative_to(Path(os.path.abspath(os.path.expanduser(str(d)))))
+            allowed = Path(str(d)).expanduser().resolve()
+            target.relative_to(allowed)
             return True
-        except ValueError:
+        except (OSError, ValueError, RuntimeError):
             continue
     return False
 
