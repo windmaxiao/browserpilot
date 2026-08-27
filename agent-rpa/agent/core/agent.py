@@ -16,6 +16,7 @@ Goal → Snapshot → Planner → Action → Executor → Observation → Loop
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import Optional
 
 from loguru import logger
@@ -574,14 +575,26 @@ class Agent:
                 return bool(getattr(el, "frame_path", ()))
         return False
 
-    async def _refresh_if_frame(self, snapshot, action) -> Snapshot:
-        """iframe Action 失败后：重新 Observe，避免复用点击后可能已失效的
-        frame_path / target_id（#5）。无法观察时回退原 snapshot。
+    def _pinned_retry_action(self, action: Action, snapshot: Optional[Snapshot]) -> Action:
+        """机械重试前固定 iframe 目标的显式定位参数（待解决问题 #2）。
+
+        重新 Observe 生成的新 Snapshot 会按生命周期重新编号 element_id，
+        携带旧 target_id 的重试动作在新映射下可能命中错位元素；因此重试
+        不替换 Snapshot，而是从原始 Snapshot 取出该元素的 selector 写入
+        params 作显式定位（Executor 中 params["selector"] 优先级最高）。
+        target_id 保持不变，使 frame_path 解析仍命中原元素、iframe 链不
+        被降级为主页面。
+
+        非 iframe 元素或 target_id 无法命中时原样返回。
         """
-        if not self._is_frame_action(snapshot, action):
-            return snapshot
-        fresh = await self._safe_observe()
-        return fresh if fresh is not None else snapshot
+        if snapshot is None or not self._is_frame_action(snapshot, action):
+            return action
+        for el in snapshot.get_interactive_elements():
+            if el.element_id == action.target_id:
+                params = dict(action.params)
+                params["selector"] = el.selector
+                return replace(action, params=params)
+        return action
 
     async def _execute_action_with_retry(
         self,
@@ -594,8 +607,10 @@ class Agent:
 
         策略（用户确认）：
         1. 首次执行；
-        2. 失败 → 机械重试 1 次（处理瞬时错误，如元素刚渲染；iframe Action
-           重试前重新 Observe，避免复用失效的 frame_path / target_id —— #5）；
+        2. 失败 → 机械重试 1 次（处理瞬时错误，如元素刚渲染）；重试不替换
+           Snapshot —— 重新 Observe 会令 element_id 重新编号，旧 target_id
+           在新映射下可能命中错位元素 —— iframe 目标改为以原始 Snapshot 的
+           显式 selector 定位（待解决问题 #2）；
         3. 仍失败 → Reflection：Planner 分析失败原因给出替代动作并执行 1 次；
         4. 仍失败 → 返回最后一次失败 Observation（上层中止任务）。
 
@@ -608,10 +623,10 @@ class Agent:
         if observation is None or not observation.is_error:
             return observation, action
 
-        # 2. 机械重试 1 次
+        # 2. 机械重试 1 次：保持原 Snapshot，iframe 目标固定为原始 Snapshot
+        #    中的显式 selector，避免旧 target_id 在新映射下错位（待解决问题 #2）
         logger.warning("🔁 [Step {}] 执行失败: {} → 机械重试", step, observation.error)
-        snapshot = await self._refresh_if_frame(snapshot, action)
-        retry = await self._safe_execute(action, snapshot)
+        retry = await self._safe_execute(self._pinned_retry_action(action, snapshot), snapshot)
         if retry is None:
             return None, action
         if not retry.is_error:

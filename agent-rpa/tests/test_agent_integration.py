@@ -564,28 +564,31 @@ async def test_task_planner_drives_two_phase_flow():
 # ── V0.4 前瞻：失败重试（机械 1 次 → Reflection 1 次 → 中止） ────────
 
 @pytest.mark.asyncio
-async def test_frame_action_refreshes_snapshot_on_retry():
-    """V1.0 #5：iframe Action 失败后机械重试前重新 Observe，
-    用最新 Snapshot 重新解析 frame_path，不复用点击后可能失效的路径"""
-    def snap(frame_path):
+async def test_frame_retry_pins_locator_without_reobserve():
+    """待解决问题 #2：iframe Action 失败后机械重试不重新 Observe，
+    以原始 Snapshot 的显式 selector 定位原元素 —— 新 Snapshot 的
+    element_id 会重新编号，沿用旧 target_id 可能命中错位元素"""
+    def snap(frame_path, selector):
         s = Snapshot(title="t", url="https://example.com")
         s.buttons = [ElementInfo(
             text="btn", tag="button", element_type="button",
-            selector="#frame-btn", element_id="e1", frame_path=frame_path,
+            selector=selector, element_id="e1", frame_path=frame_path,
         )]
         return s
 
-    snap_before = snap(("iframe >> nth=0",))
-    snap_after = snap(("iframe >> nth=1",))   # Frame 重建后位置变化
+    snap_before = snap(("iframe >> nth=0",), "#frame-btn")
+    # 诱饵快照：若错误地重新 Observe 后沿用旧 target_id，将命中
+    # 序号错位的其他元素（不同 selector / 不同 frame）
+    snap_decoy = snap(("iframe >> nth=1",), "#evil-btn")
 
     observer = MagicMock()
-    observer.observe = AsyncMock(side_effect=[snap_after])  # 刷新时返回新位置
+    observer.observe = AsyncMock(return_value=snap_decoy)
 
     planner = _PlannerStub([])
     tool = MagicMock()
     tool.click = AsyncMock(side_effect=[
-        Observation.fail("元素未就绪"),   # 首次失败（旧 frame_path 失效）
-        Observation.ok(page_changed=True),  # 刷新后重试成功
+        Observation.fail("元素未就绪"),     # 首次失败
+        Observation.ok(page_changed=True),  # 固定定位后重试成功
     ])
     tool.current_url = "https://example.com"
     tool.current_title = AsyncMock(return_value="t")
@@ -593,14 +596,18 @@ async def test_frame_action_refreshes_snapshot_on_retry():
     agent = Agent(observer, planner, Executor(tool), max_steps=5)
     action = Action(action="click", target_id="e1")
 
-    obs, _ = await agent._execute_action_with_retry(action, snap_before, step=1)
+    obs, final_action = await agent._execute_action_with_retry(action, snap_before, step=1)
 
     assert obs.success is True
     assert tool.click.await_count == 2
-    # 机械重试前重新观察，第二次执行使用新 frame_path（而非失效的 nth=0）
-    assert tool.click.call_args_list[1].kwargs["frame_path"] == ("iframe >> nth=1",)
-    # 直接调用 retry：首次使用传入 snapshot，仅刷新阶段观察 1 次
-    assert observer.observe.await_count == 1
+    # 重试使用原始 Snapshot 中该元素的显式 selector 与原 frame_path，
+    # 而非诱饵快照中同序号元素的定位信息
+    assert tool.click.call_args_list[1].args[0] == "#frame-btn"
+    assert tool.click.call_args_list[1].kwargs["frame_path"] == ("iframe >> nth=0",)
+    assert observer.observe.await_count == 0       # 全程未重新 Observe
+    # 定位改写只作用于重试副本，不污染原 Action
+    assert not action.params.get("selector")
+    assert final_action is action
 
 
 @pytest.mark.asyncio
