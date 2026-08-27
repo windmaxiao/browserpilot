@@ -290,10 +290,19 @@ class BrowserTool:
         self,
         selector: str,
         save_path: Optional[str | Path] = None,
+        *,
+        download_dir: Optional[str | Path] = None,
         timeout: int = 30000,
         frame_path=(),
     ) -> Observation:
-        """下载文件"""
+        """下载文件。
+
+        Args:
+            selector: 触发下载的元素选择器
+            save_path: 可选，完整落盘文件路径（含文件名）
+            download_dir: 可选，落盘目录；指定时与 ``suggested_filename`` 拼接文件名，
+                属调用方策略，优先于 ``save_path``（M5/待解决问题 #3/#5）
+        """
         logger.info("⬇️ download: {}", selector)
         start = time.time()
         try:
@@ -302,7 +311,12 @@ class BrowserTool:
                 await locator.click()
 
             download = await download_info.value
-            target_path = save_path or Path.cwd() / download.suggested_filename
+            if download_dir:
+                target_path = Path(download_dir) / download.suggested_filename
+            elif save_path:
+                target_path = save_path
+            else:
+                target_path = Path.cwd() / download.suggested_filename
             await download.save_as(str(target_path))
             await self._smart_wait()
 

@@ -402,6 +402,18 @@ class TestDownload:
         assert obs.data["download_path"].endswith("auto.csv")
 
     @pytest.mark.asyncio
+    async def test_download_with_download_dir_appends_suggested_filename(self):
+        """#3：download_dir 为目录语义，保存路径 = 目录 / suggested_filename（不丢失文件名）"""
+        page, _, download = make_download_page_mock()
+        download.suggested_filename = "report.csv"
+        tool = BrowserTool(page)
+        obs = await tool.download("#dl-btn", download_dir="C:/downloads")
+        assert obs.success is True
+        # 归一化反斜杠后在跨平台断言拼接结果
+        called = str(download.save_as.await_args.args[0]).replace("\\", "/")
+        assert called == "C:/downloads/report.csv"
+
+    @pytest.mark.asyncio
     async def test_download_failure_returns_fail(self):
         page, _, _ = make_download_page_mock()
         page.expect_download = MagicMock(side_effect=Exception("download timed out"))

@@ -195,12 +195,15 @@ class Executor:
     async def _execute_download(self, action: Action) -> Observation:
         selector = self._resolve_target(action)
         if selector:
-            # M5：模型无法指定 save_path（parse 层已剥离），落盘目录取调用方策略
-            save_path = action.params.get("save_path") or self._download_dir
-            logger.info("下载文件 → selector: {} | save_path: {}", selector, save_path)
+            # M5 + 待解决问题 #3：模型不得决定落盘位置——save_path 无条件剥离
+            # （防绕过 parse 层直接构造 Action）。落盘目录仅由调用方配置的
+            # download_dir 决定；未配置时由 BrowserTool 沿用
+            # cwd + suggested_filename 默认落盘
+            logger.info("下载文件 → selector: {} | download_dir: {}", selector, self._download_dir)
             return await self._tool.download(
                 selector,
-                save_path=save_path,
+                save_path=None,
+                download_dir=self._download_dir,
                 timeout=action.params.get("timeout", 30000),
                 frame_path=self._resolve_frame_path(action),
             )

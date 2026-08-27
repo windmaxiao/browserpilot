@@ -383,27 +383,33 @@ class TestExtraHandlers:
         mock_tool.scroll.assert_awaited_once_with(direction="down", amount=300)
 
     @pytest.mark.asyncio
-    async def test_execute_download(self, mock_tool):
+    async def test_execute_download_strips_save_path(self, mock_tool):
+        """待解决问题 #3：save_path 无条件剥离——即便未配置 download_dir，
+        手动构造 Action 携带的 save_path 也不得透传（落盘位置只由调用方决定）"""
         executor = Executor(mock_tool)
-        action = Action(action="download", target="导出", params={"save_path": "out.csv"})
+        action = Action(action="download", target="导出",
+                        params={"save_path": "C:/evil/out.csv"})
         obs = await executor.execute(action)
         assert obs.success is True
         mock_tool.download.assert_awaited_once_with(
             ':has-text("导出")',
-            save_path="out.csv",
+            save_path=None,
+            download_dir=None,
             timeout=30000,
             frame_path=(),
         )
 
     @pytest.mark.asyncio
     async def test_execute_download_uses_configured_download_dir(self, mock_tool):
-        """M5：save_path 缺失时下载落盘到调用方配置的 download_dir"""
+        """#3/#5：配置 download_dir 时作为目录传给 BrowserTool，且忽略 action.save_path"""
         executor = Executor(mock_tool, download_dir="C:/downloads")
-        action = Action(action="download", target="导出")
+        # 即便手动构造 Action 携带 save_path，download_dir 也应优先（调用方策略）
+        action = Action(action="download", target="导出", params={"save_path": "evil.csv"})
         obs = await executor.execute(action)
         assert obs.success is True
         mock_tool.download.assert_awaited_once_with(
-            ':has-text("导出")', save_path="C:/downloads", timeout=30000, frame_path=(),
+            ':has-text("导出")', save_path=None, download_dir="C:/downloads",
+            timeout=30000, frame_path=(),
         )
 
     @pytest.mark.asyncio
@@ -544,6 +550,7 @@ class TestExtraHandlersFramePath:
         tool.download.assert_awaited_once_with(
             "#dl-btn",
             save_path=None,
+            download_dir=None,
             timeout=30000,
             frame_path=("#outer", "#inner"),
         )
