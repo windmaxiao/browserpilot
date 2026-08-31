@@ -73,7 +73,7 @@ python examples/baidu_demo.py
 python examples/llm_agent_demo.py
 python examples/llm_baidu_demo.py
 
-# 运行测试（16 个测试文件，300+ 个用例）
+# 运行测试（16 个测试文件，400+ 个用例）
 pytest
 ```
 
@@ -89,6 +89,7 @@ pytest
 | V0.4 | Reflection：错误恢复与重试（失败重试 / Reflection / 后退刷新恢复 / LLM 重试） | ✅ 完成 |
 | V0.5 | Memory：历史操作与上下文记忆（增量摘要 + 滑动窗口 + 上下文压缩） | ✅ 完成 |
 | V1.0 | 完整 Agentic RPA：多层 iframe 操作基座已完成；ydgx 业务示例登录/跳转/菜单导航已 LLM 局部辅助化（占位符注入 + 失败回退确定性） | 🚧 子计划 A 完成，其余规划中 |
+| V1.1 | 稳定化与生产可观测：清偿 52 项已知问题（弹窗应对 / 规划降级 / 脱敏收口 / 追踪指标） | 📋 待开始 |
 
 ## 授权
 

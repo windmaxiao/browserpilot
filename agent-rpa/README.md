@@ -122,7 +122,7 @@ agent-rpa/
 │   ├── search_page.html    # 本地确定性搜索页（agent_demo 使用）
 │   └── ex_robot/ydgx/      # 业务示例（LLM 局部辅助：登录/跳转/菜单导航 + 多层 iframe + 失败回退，不入 git）
 │
-└── tests/                  # 16 个文件，300+ 个用例
+└── tests/                  # 16 个文件，400+ 个用例
     ├── test_action.py                    # Action Schema + 参数校验
     ├── test_observation.py               # Observation Schema
     ├── test_snapshot.py                  # Snapshot Schema + Generator 基础

@@ -26,6 +26,7 @@ browserpilot/
 ├── Agentic_RPA_项目规划_V0.1.md        # 原始项目规划文档
 ├── V0.5开发计划.md                     # V0.5 开发计划（✅ 已完成）
 ├── V1.0开发计划（新）.md               # V1.0 开发计划（iframe 能力已完成，其余规划中）
+├── V1.1开发计划.md                     # V1.1 开发计划（稳定化与生产可观测，📋 待开始）
 ├── README.md                          # 项目入口 README
 ├── LICENSE                            # Apache License 2.0
 ├── .gitignore
@@ -261,7 +262,7 @@ class Snapshot:
 | `select(selector, value, timeout)` | str, str, int | 下拉选择（对比 URL 判断 page_changed） |
 | `scroll(direction, amount)` | str, int | 滚动（down/up/bottom/top） |
 | `wait(ms)` | int | 等待指定毫秒数 |
-| `download(selector, save_path, timeout)` | str, str/Path, int | 下载文件 |
+| `download(selector, save_path, download_dir, timeout)` | str, str/Path, str/Path, int | 下载文件（`download_dir` 目录语义优先于 `save_path`，目录与 `suggested_filename` 拼接；Executor 层恒传 `save_path=None`） |
 | `upload(selector, file_path, timeout)` | str, str/Path, int | 上传文件 |
 | `back()` | — | 浏览器后退 |
 | `refresh()` | — | 刷新页面 |
@@ -323,12 +324,12 @@ class Agent:
 
 **关键设计决策：**
 - Step 索引从 1 开始
-- **失败自动重试（V0.4）**：机械重试 1 次 → Reflection（LLM 分析失败给出替代动作）1 次 → 仍失败尝试页面恢复（back/refresh）→ 仍失败中止任务
+- **失败自动重试（V0.4）**：机械重试 1 次 → Reflection（LLM 分析失败给出替代动作）1 次 → 仍失败尝试页面恢复（back/refresh）→ 仍失败中止任务；机械重试**不替换 Snapshot**——iframe 目标经 `_pinned_retry_action()` 以原始 Snapshot 中该元素的显式 selector 固定定位，避免重新 Observe 后 element_id 重编号导致旧 target_id 命中错位元素（2026-08-27 修复）
 - Planner 返回 None 表示无法规划
 - **异常防护**：`_safe_observe()` / `_safe_execute()` 捕获浏览器关闭等异常，优雅返回失败 Observation 而非崩溃
 - **停滞检测**：自由模式连续 2 次 wait 且页面无变化 → 提前终止；仅对 `Planner.stagnation_detection=True`（默认）的规划器生效——`RuleBasedPlanner` 覆盖为 `False`（自身用 `_WAIT_MAX_TRIES` 控制等待次数，不被截断）；计划内 wait 步骤不计入（步骤模式不做该检测，队列必然推进）
 - **重复动作检测（V1.0 批量增强）**：页面未变化时连续对同一目标执行相同动作（input/click/select/scroll），连续 `_MAX_REPEAT_SKIPS=3` 次即判停滞终止，防止 LLM 反复填同一字段
-- **iframe 定位与恢复（V1.0 子计划 A）**：`ElementInfo` 携带 `frame_path`（元组，空为主页面）；Executor 维护 `element_id → (selector, frame_path)` 映射并向 BrowserTool 透传；`target_id` 命中时优先于注入的 `params["selector"]`；frame 失效后旧路径作废，需重新 Observe 再解析 `target_id`
+- **iframe 定位与恢复（V1.0 子计划 A）**：`ElementInfo` 携带 `frame_path`（元组，空为主页面）；Executor 维护 `element_id → (selector, frame_path)` 映射并向 BrowserTool 透传；`target_id` 命中时优先于注入的 `params["selector"]`；element_id 只在单个 Snapshot 内有效——frame 失效后旧路径作废，重新 Observe 后须以新 Snapshot 的 target_id 重新定位（机械重试因此不替换 Snapshot，见「失败自动重试」）
 - **历史记忆（V0.5）**：每步经 `_record_step()` 写入原始历史与 `HistoryMemory`，`plan_with_history` / `plan_step` / `reflect` 传 `memory.context_entries()`（摘要 + 最近窗口）而非原始全量历史
 
 #### `executor.py` — Executor（Action → BrowserTool 翻译层）
@@ -341,7 +342,7 @@ class Executor:
 
 - `execute(action)` — 分发表：action.type → handler
 - `download_dir` / `allowed_upload_dirs`（M5 文件路径策略，可选）：
-  - `download_dir`：download 落盘目录（模型无法指定 save_path，parse 层已剥离）；未提供时 BrowserTool 默认落盘当前目录 + 服务器文件名
+  - `download_dir`：download 落盘目录；未提供时 BrowserTool 默认落盘当前目录 + 服务器文件名。`save_path` 双防线剥离——parse 层（`parse_action_dict`）与 Executor 层均无条件剥离，不经 parse 构造的 Action 同样无法指定落点
   - `allowed_upload_dirs`：upload 文件所在目录白名单；**未配置则 upload 动作一律拒绝**（默认最严格），配置后 value 须落在允许目录内
 - `_resolve_selector(target, params)` — 优先级：
   1. `params["selector"]` 显式指定
@@ -450,7 +451,7 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 | `parse_action_dict()` | 模型 dict → 已验证 Action：伪造 selector 忽略、target_id 必须命中、未知字段丢弃 |
 | `BATCH_SYSTEM_PROMPT` / `build_hybrid_schema()` / `parse_action_list()` | 批量规划（V1.0 自由模式增强）：导航/跳转场景输出单 Action、表单场景输出 `{"actions":[...]}`（最多 10 个）；解析兼容单/批量两种输出 |
 
-**安全边界（模型不能越界）：** 模型只看到 `target_id` 与语义字段；可执行 selector 只由本地 Snapshot 映射注入；幻觉 ID、非法 action、伪造 selector 一律在进入 Executor 前被拦截；**M5 文件路径策略**：模型不得指定下载落盘路径（download 的 `save_path` 在 parse 层剥离，落盘目录由 `Executor.download_dir` 配置）；upload 必须显式允许（`allowed_upload_dirs` 未配置即拒绝，配置后 value 须落在允许目录内，Executor 二次校验为防御纵深）。
+**安全边界（模型不能越界）：** 模型只看到 `target_id` 与语义字段；可执行 selector 只由本地 Snapshot 映射注入；幻觉 ID、非法 action、伪造 selector 一律在进入 Executor 前被拦截；**M5 文件路径策略**：模型不得指定下载落盘路径（`save_path` 在 parse 层与 Executor 层双防线无条件剥离，落盘目录仅由 `Executor.download_dir` 决定，未配置时 BrowserTool 沿用 cwd + 服务器文件名）；upload 必须显式允许（`allowed_upload_dirs` 未配置即拒绝，配置后 value 须落在允许目录内，Executor 二次校验为防御纵深）。
 
 ---
 
@@ -480,7 +481,7 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 - ✅ **Memory（V0.5）**：`HistoryMemory` 增量式历史记忆（滚动摘要：超出窗口的旧条目按批折叠，默认 `window=5, batch=10`，可注入异步 LLM 摘要器）、`summarize_entries()` 规则式摘要（不含输入值/URL 等敏感内容）、上下文压缩（`context_entries()` = 摘要 + 最近窗口，摘要不占窗口名额）、`serialize_history` / `build_user_prompt` 摘要协议、Agent `_record_step()` 同步记录 + `plan_with_history` / `plan_step` / `reflect` 传压缩上下文
 - ✅ **批量规划（V1.0 自由模式增强）**：`plan_batch()` 一次 LLM 返回最多 10 个动作（`BATCH_SYSTEM_PROMPT` / `build_hybrid_schema` 混合 schema / `parse_action_list` 兼容单/批量输出），同 Snapshot 连续执行、任一失败/页面变化/done 即断批；`Planner.plan_batch` 默认退化为单动作保证兼容；**重复动作检测**（页面未变化时连续 `_MAX_REPEAT_SKIPS=3` 次相同动作判停滞）；**`run(goal, timeout_seconds)`** 墙钟超时兜底
 - ✅ **接口契约加固（M4，2026-08-24 评审修复）**：自由模式 `plan_batch` 改 `getattr` 逐级回退（`plan_batch → plan_with_history → plan`），V0.3 鸭子类型 Planner 不再崩溃；基类声明 history 摘要条目契约（breaking change）；停滞检测按 `Planner.stagnation_detection` 启用（`RuleBasedPlanner` 覆盖 `False`，`_WAIT_MAX_TRIES=10` 不再被截断）
-- ✅ **文件路径安全（M5，2026-08-24 评审修复）**：`parse_action_dict` 剥离模型 download `save_path`（落盘目录由 `Executor.download_dir` 配置）；upload 强制目录白名单（`allowed_upload_dirs` 未配置即拒绝、`LLMPlanner` 透传、Executor 二次校验）；`schema/action.py` 新增纯函数 `is_path_within_allowed`
+- ✅ **文件路径安全（M5，2026-08-24/27 评审修复）**：模型 download `save_path` 双防线无条件剥离（`parse_action_dict` + Executor 层，落盘目录仅由 `Executor.download_dir` 决定）；`BrowserTool.download` 新增 `download_dir` 目录参数（优先于 save_path，目录与 `suggested_filename` 拼接）；upload 强制目录白名单（`allowed_upload_dirs` 未配置即拒绝、`LLMPlanner` 透传、Executor 二次校验）；`schema/action.py` 纯函数 `is_path_within_allowed` 改用 `Path.resolve()` 解析符号链接/junction，防白名单目录内链接指向外部路径绕过
 - ✅ 16 个测试文件，400+ 个用例（Schema / Executor / Planner / BrowserTool / SnapshotGenerator / Snapshot iframe / Agent 集成 / LLMClient / 序列化 / LLMPlanner / Memory / Logging / TaskQueue）
 - ✅ 5 个 Demo（手动 / 规则 Agent 本地页 / 规则 Agent 百度 / LLM Agent 自由模式 / LLM Agent 两阶段真实百度，端到端跑通）+ 1 个业务示例（`examples/ex_robot/ydgx`：LLM 局部辅助 + 多层 iframe + 失败回退确定性，不入 git）
 
@@ -488,10 +489,11 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 
 | # | 问题 | 优先级 | 状态 |
 |---|------|--------|------|
-| 1 | texts 含 span 噪音 | 🟡 | 暂不处理 |
+| #4 | download 直接拼接 `suggested_filename` 落盘，不可信文件名存在路径穿越面 | 🔴 | 待修复 |
+| #5 | texts 含 span 噪音 | 🟡 | ⏸️ 暂不处理 |
 | — | 规则 7「点击首条结果」非死代码，设计取舍保留（本文件自管，未入 待解决问题.md） | 🟡 | 🔒 保留 |
 
-> 完整列表见 [待解决问题.md](待解决问题.md)：当前跟踪 2 项（🟡 1、🟢 1），已解决条目随修复移除，编号不复用（#16-#25 为 2026-08 增补，其中 #10-#19/#21/#22/#24、#6、#7、#8、#23、#25 已修复，#20 确认保留；2026-08-24 修复步骤模式 wait 重试与手动 step()/observe() 防护后，待解决问题.md 原 #3/#4 已移除；同日按 qwen38审查问题.md 修复 C1-C4/M1-M3，以及 M4 接口契约加固与 M5 文件路径安全）。
+> 完整列表见 [待解决问题.md](待解决问题.md)：当前跟踪 46 项（🔴 1、🟡 12、🟢 33、⏸️ 1），已解决条目随修复移除，编号不复用。2026-08-27 修复三项：文件路径白名单 `Path.resolve()` 防符号链接/junction 绕过、download 新增 `download_dir` 目录参数且 Executor 无条件剥离 `save_path`、iframe 动作机械重试固定显式 selector 定位（不再刷新 Snapshot）；更早修复历史见该文件「最近移除」。
 
 ---
 
@@ -571,6 +573,7 @@ pytest                     # 运行全部测试
 | 了解项目全局 | 本文件 |
 | 了解要修什么 bug | `待解决问题.md` |
 | 了解架构背景 | `Agentic_RPA_项目规划_V0.1.md` |
+| 了解当前开发计划 | `V1.1开发计划.md`（问题分组映射见其第 2 节） |
 | 增删改 Action 类型 | `agent/schema/action.py` + `agent/core/executor.py` |
 | 修改页面元素抓取 | `agent/browser/snapshot.py` |
 | 修改浏览器操作 | `agent/browser/playwright.py` |
