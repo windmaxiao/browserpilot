@@ -940,6 +940,9 @@ async def test_step_mode_wait_failure_mechanical_retry_succeeds():
     assert obs.success is True
     assert tool.wait.await_count == 2   # 首次失败 + 机械重试成功
     tool.click.assert_awaited_once()
+    # 待解决问题 #41：wait 失败→机械重试成功的中间失败不入史，只记最终成功一次。
+    # 步骤 1 = wait、步骤 2 = click，各记一条 → 历史共 2 条（而非 3 条）。
+    assert len(agent.history) == 2, f"wait 重试不应重复入史: {len(agent.history)}"
 
 
 @pytest.mark.asyncio

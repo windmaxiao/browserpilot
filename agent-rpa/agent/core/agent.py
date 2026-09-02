@@ -378,8 +378,9 @@ class Agent:
                     return Observation.fail(
                         error=f"在第 {self._current_step} 步动作执行异常（浏览器可能已关闭）",
                     )
-                await self._record_step(self._current_step, action, observation)
-                # 等待失败：机械重试 1 次 → 页面恢复 → 中止（#7，与 action 步骤对齐）
+                # 等待失败：机械重试 1 次 → 页面恢复 → 中止（#7，与 action 步骤对齐）。
+                # 待解决问题 #41：不在此处记录（失败也记一次、重试成功又记一次会重复入史，
+                # 挤占 Memory 摘要窗口、可能干扰规划器），改为在最终消费/失败中止时统一记录一次。
                 if observation.is_error:
                     logger.warning(
                         "❌ [Step {}] 计划内等待失败: {} → 重试",
@@ -391,7 +392,6 @@ class Agent:
                             error=f"在第 {self._current_step} 步动作执行异常（浏览器可能已关闭）",
                         )
                     if not retry.is_error:
-                        await self._record_step(self._current_step, action, retry)
                         observation = retry
                     elif self._recovery_count < self._max_recoveries and await self._recover_page():
                         self._recovery_count += 1
@@ -401,8 +401,13 @@ class Agent:
                         )
                         continue
                     else:
+                        # 最终失败中止：此处记录一次最终失败 Obs，返回给上层
+                        await self._record_step(self._current_step, action, retry)
                         return retry
                 queue.pop()
+                # 待解决问题 #41：仅在最终成功/消费后记录一次，
+                # 重试产生的中间失败 Observation 不入 Memory
+                await self._record_step(self._current_step, action, observation)
                 logger.info("✅ [Step {}] 等待完成 | URL: {}", self._current_step, observation.url)
                 continue
 

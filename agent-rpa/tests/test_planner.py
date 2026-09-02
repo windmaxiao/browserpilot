@@ -310,6 +310,23 @@ class TestEnhancedGoalParsing:
         assert spec.target_texts == ["登录"]
         assert spec.wait_loading is True
 
+    def test_click_target_stops_at_halfwidth_comma(self):
+        """点击目标遇半角逗号/分号截断（待解决问题 #49，中英混输）"""
+        spec = parse_goal("点击 登录, 然后搜索 北京时间")
+        assert spec.target_texts == ["登录"]
+
+    def test_click_target_preserves_dotted_version(self):
+        """点击目标内半角点号（版本号/日期）不被误截断（待解决问题 #49）"""
+        spec = parse_goal("点击 v1.2 版本 下载")
+        assert "v1.2" in spec.target_texts[0]
+        date_spec = parse_goal("点击 2024.06.05 记录")
+        assert "2024.06.05" in date_spec.target_texts[0]
+
+    def test_click_target_stops_at_dotted_space(self):
+        """半角点号后跟空白时视为短语边界（待解决问题 #49）"""
+        spec = parse_goal("点击 登录. 然后 查找 X")
+        assert spec.target_texts == ["登录"]
+
     def test_click_target_quoted_preferred(self):
         """点击目标含引号时优先取引号内容，不产生冗余目标"""
         spec = parse_goal('点击"登录"按钮')
