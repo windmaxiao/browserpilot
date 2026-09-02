@@ -32,6 +32,10 @@ from agent.schema.snapshot import Snapshot
 # 重复动作检测（V1.0 批量增强）：连续 N 次对同一目标执行相同动作且页面无变化 → 判停滞
 _MAX_REPEAT_SKIPS = 3
 
+# 待解决问题 #37：页面恢复后等待页面稳定再让 Agent 重新观察的固定延时（秒）。
+# 提取为类常量并可通过 Agent(...) 构造参数覆盖，避免恢复流程中魔法字面量。
+_RECOVERY_PAUSE_DEFAULT = 0.5
+
 
 class Agent:
     """
@@ -50,12 +54,29 @@ class Agent:
         executor: Executor,
         max_steps: int = 50,
         max_recoveries: int = 2,
+        recovery_pause: float = _RECOVERY_PAUSE_DEFAULT,
+        fallback_planner: Optional[Planner] = None,
+        fallback_after_failures: int = 3,
+        human_in_the_loop: Optional[Callable[[dict], dict]] = None,
     ):
         self._observer = observer
         self._planner = planner
         self._executor = executor
         self._max_steps = max_steps
         self._max_recoveries = max_recoveries
+        # 待解决问题 #37：页面恢复后等待稳定延时，允许调用方覆盖默认 0.5s
+        self._recovery_pause = max(0.0, recovery_pause)
+        # 待解决问题 #51：规划降级 —— LLM 规划连续失败 N 步后切换兜底 Planner
+        # （如 RuleBasedPlanner），避免模型输出格式错误/动作歧义时任务直接中止。
+        self._fallback_planner = fallback_planner
+        self._fallback_after_failures = max(1, fallback_after_failures)
+        self._plan_fail_streak = 0
+        self._active_planner = planner
+        # 待解决问题 #51：human-in-the-loop 暂停/人工接管扩展点。可选的同步/异步
+        # 回调 async def (context: dict) -> dict，在连续规划失败需暂停或人工决策时
+        # 由 Agent 调用；返回 dict 可含 {"action": ...} 供下一步执行，或 {"feedback":...}
+        # 供注入规划器。默认 None（无人工通道，规划失败就到降级/中止）。
+        self._human_in_the_loop = human_in_the_loop
 
         # 运行时状态
         self._history: list[dict] = []
@@ -110,11 +131,18 @@ class Agent:
         self._memory.clear()
         self._current_step = 0
         self._recovery_count = 0
+        # 待解决问题 #51：每次 run 重新从主 Planner 出发，重置连续失败计数与降级态
+        self._plan_fail_streak = 0
+        self._active_planner = self._planner
         # 清空规划器状态（#11），保证复用 Agent 时无状态残留；外部自定义
         # Planner 可能未实现 reset，用 getattr 防御（与 decompose 一致）。
         reset = getattr(self._planner, "reset", None)
         if reset is not None:
             reset()
+        if self._fallback_planner is not None:
+            fb_reset = getattr(self._fallback_planner, "reset", None)
+            if fb_reset is not None:
+                fb_reset()
 
         if timeout_seconds is None:
             return await self._run_body(goal)
@@ -124,6 +152,13 @@ class Agent:
             )
         except asyncio.TimeoutError:
             logger.warning("⏱️ 任务超时（{:.0f}s）终止 | goal: {}", timeout_seconds, goal)
+            # 待解决问题 #25：wait_for 通过 cancel 终止，取消点可能落在 Playwright
+            # CDP 调用中途，页面处于不确定状态。随后复用同一浏览器可能遇到半完成
+            # 状态，故超时后主动 refresh 一次复位页面，降低复用风险。
+            try:
+                await self._executor.execute(Action(action="refresh"))
+            except Exception as refresh_e:
+                logger.warning("任务超时后复位页面失败: {}", refresh_e)
             return Observation.fail(
                 error=f"任务执行超过 {timeout_seconds:g} 秒，已超时终止",
             )
@@ -170,7 +205,7 @@ class Agent:
             # M4：兼容 V0.3 鸭子类型自定义 Planner（未继承基类）——
             # plan_batch → plan_with_history → plan 逐级回退，避免 AttributeError
             logger.info("📝 [Step {}/{}] 规划动作...", self._current_step + 1, self._max_steps)
-            planner = self._planner
+            planner = self._active_planner
             plan_batch = getattr(planner, "plan_batch", None)
             # 待解决问题 #15：Planner 协程异常一律视为「本轮无法规划」，走既有降级路径
             if plan_batch is not None:
@@ -190,10 +225,23 @@ class Agent:
                 actions = [action] if action is not None else None
             if not actions:
                 logger.warning("⚠️  无法规划出有效动作")
+                if await self._maybe_invoke_human(snapshot, goal):
+                    continue  # 人工接管返回了动作，本轮已执行，回到循环继续
+                # 待解决问题 #51：配置了兜底 Planner 且连续失败未达阈值时，不直接
+                # 中止 —— 本轮失败可能是 LLM 瞬时故障，允许重试规划；达到阈值后由
+                # _maybe_invoke_human 切换兜底 Planner（切换时 streak 归零，兜底再
+                # 连续失败达阈值才真正中止），避免单次格式错误/歧义整任务失败。
+                if (
+                    self._fallback_planner is not None
+                    and self._plan_fail_streak < self._fallback_after_failures
+                ):
+                    continue
                 return Observation.fail(
                     error=f"在第 {self._current_step + 1} 步无法规划出有效动作",
                     url=snapshot.url,
                 )
+            # 待解决问题 #51：规划成功即清零连续失败计数（用于触发 fallback 降级）
+            self._plan_fail_streak = 0
 
             # 3. 批量执行（同一 Snapshot，逐动作执行/记录）
             failed_obs: Optional[Observation] = None
@@ -587,6 +635,70 @@ class Agent:
             logger.error("Planner.{} 调用异常，视为无法规划: {}", label, e)
             return None
 
+    async def _maybe_invoke_human(self, snapshot: Snapshot, goal: str) -> bool:
+        """规划失败时的降级 + 人工接管（待解决问题 #51）。
+
+        调用时机：本轮无法规划出有效动作时。
+        顺序：
+        1. 连续失败计数自增（成功规划时在正常路径清零）；
+        2. 达到阈值且配置了 fallback_planner → 切换到兜底 Planner 并降级告警；
+        3. 配置了 human_in_the_loop → 调用人工接管回调，若返回有效动作则执行之，
+           否则返回 False 交由上层中止。
+
+        Returns:
+            True 表示本轮已由人工接管执行了动作，主循环应 continue；False 表示
+            应走中止路径。
+        """
+        self._plan_fail_streak += 1
+        # 1) 连续失败超过阈值 → 切换兜底 Planner（仅切换一次，不循环切回）
+        if (
+            self._fallback_planner is not None
+            and self._active_planner is not self._fallback_planner
+            and self._plan_fail_streak >= self._fallback_after_failures
+        ):
+            logger.warning(
+                "规划连续失败 {} 次，降级到兜底 Planner: {}",
+                self._plan_fail_streak,
+                type(self._fallback_planner).__name__,
+            )
+            self._active_planner = self._fallback_planner
+            self._plan_fail_streak = 0  # 兜底 Planner 也从零计数，其再失败才到人工/中止
+
+        # 2) 兜底后仍无可规划 → 人工接管（若配置）
+        if self._human_in_the_loop is None:
+            return False
+        try:
+            ctx = {
+                "goal": goal,
+                "snapshot_url": snapshot.url,
+                "step": self._current_step + 1,
+                "history": self._memory.context_entries(),
+            }
+            result = self._human_in_the_loop(ctx)
+            if asyncio.iscoroutine(result):
+                result = await result
+        except Exception as e:
+            logger.warning("human-in-the-loop 回调异常，按无人接管处理: {}", e)
+            return False
+        action_dict = result.get("action") if isinstance(result, dict) else None
+        if not action_dict:
+            return False
+        try:
+            action = Action(**action_dict)
+        except Exception as e:
+            logger.warning("人工接管返回的 action 非法: {}", e)
+            return False
+        logger.info("🧑‍💻 人工接管: 执行动作 {}", action.action)
+        self._current_step += 1  # 人工动作也占用一步，保证主循环步数推进、不无限空转
+        obs, final_action = await self._execute_action_with_retry(
+            action, snapshot, step=self._current_step,
+        )
+        if obs is not None and not obs.is_error:
+            self._plan_fail_streak = 0  # 人工动作成功也算一次有效进展
+            await self._record_step(self._current_step, final_action, obs)
+            return True
+        return False
+
     @staticmethod
     def _action_fingerprint(action: Action) -> tuple:
         """重复动作指纹：动作 + 目标 + 语义参数（待解决问题 #12）。
@@ -724,7 +836,7 @@ class Agent:
             back_obs = await self._executor.execute(Action(action="back"))
             if back_obs is not None and not back_obs.is_error:
                 logger.info("🔄 页面恢复: 后退成功 | URL: {}", back_obs.url)
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(self._recovery_pause)
                 return True
             logger.debug("后退恢复未生效: {}", back_obs.error if back_obs else "无返回")
         except Exception as e:

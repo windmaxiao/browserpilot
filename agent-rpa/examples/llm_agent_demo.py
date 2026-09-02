@@ -87,7 +87,10 @@ async def main() -> int:
     try:
         tool = manager.create_tool()
         # 跟随新标签页：点击 target=_blank 链接后 SnapshotGenerator 同步切换页面
-        gen = SnapshotGenerator(manager.page)
+        gen = SnapshotGenerator(
+            manager.page,
+            dialog_provider=tool.dialogs,  # 待解决问题 #50：把 JS 弹窗记录放入 Snapshot
+        )
         manager.subscribe_page(gen.set_page)
         observer = Observer(gen)
         planner = LLMPlanner(client, model=client.model, timeout=30_000)
@@ -107,6 +110,8 @@ async def main() -> int:
         logger.info("🎉 LLM Agent 端到端跑通！")
         return 0
     finally:
+        # 待解决问题 #7：成对注销页面订阅，避免监听器与旧 Generator 泄漏
+        manager.unsubscribe_page(gen.set_page)
         await manager.stop()
 
 

@@ -218,3 +218,64 @@ async def test_icon_button_kept_with_placeholder():
 
     assert len(snapshot.buttons) == 1
     assert snapshot.buttons[0].text == "图标按钮#1"
+
+
+# ═══════════════════════════════════════════════════════════════
+# JS 弹窗记录填充 Snapshot.dialogs（待解决问题 #50）
+# ═══════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_generate_fills_dialogs_from_provider():
+    """配置 dialog_provider 后，Snapshot.dialogs 透传弹窗记录（#50）"""
+    btn = make_el(tag="button", text="删除")
+    page = make_page(
+        [btn],  # buttons
+        [], [], [], [],
+    )
+    sg = SnapshotGenerator(
+        page,
+        dialog_provider=lambda: [
+            {"type": "confirm", "message": "确定删除?", "handled": True},
+        ],
+    )
+
+    snapshot = await sg.generate()
+
+    assert len(snapshot.dialogs) == 1
+    assert snapshot.dialogs[0]["type"] == "confirm"
+    assert snapshot.dialogs[0]["message"] == "确定删除?"
+
+
+@pytest.mark.asyncio
+async def test_generate_dialogs_empty_without_provider():
+    """未配置 dialog_provider 时 Snapshot.dialogs 保持空（#50 默认行为）"""
+    btn = make_el(tag="button", text="删除")
+    page = make_page(
+        [btn],  # buttons
+        [], [], [], [],
+    )
+    sg = SnapshotGenerator(page)
+
+    snapshot = await sg.generate()
+
+    assert snapshot.dialogs == []
+
+
+@pytest.mark.asyncio
+async def test_generate_dialogs_ignores_provider_errors():
+    """dialog_provider 抛异常时保持空列表，不阻断 generate（#50）"""
+    btn = make_el(tag="button", text="删除")
+    page = make_page(
+        [btn],  # buttons
+        [], [], [], [],
+    )
+    sg = SnapshotGenerator(page, dialog_provider=_raising_dialog_provider)
+
+    snapshot = await sg.generate()
+
+    assert snapshot.dialogs == []
+    assert len(snapshot.buttons) == 1  # 主流程不受影响
+
+
+def _raising_dialog_provider():
+    raise RuntimeError("provider down")

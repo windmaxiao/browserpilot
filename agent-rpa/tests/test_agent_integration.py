@@ -117,12 +117,15 @@ async def test_run_timeout_returns_failure():
     planner = _PlannerStub()
     planner.plan_batch = _slow_plan_batch
     tool = MagicMock()
+    tool.refresh = AsyncMock(return_value=Observation.ok())
     executor = Executor(tool)
     agent = Agent(observer, planner, executor, max_steps=10)
 
     obs = await agent.run("目标", timeout_seconds=0.1)
     assert obs.is_error
     assert "超时" in obs.error
+    # 待解决问题 #25：超时后主动 refresh 复位页面，避免取消点落在 CDP 调用中途
+    tool.refresh.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -998,3 +1001,211 @@ async def test_manual_observe_returns_none_on_browser_closed():
     result = await agent.observe()
 
     assert result is None
+
+
+# ═══════════════════════════════════════════════════════════════
+# 待解决问题 #51：LLM 规划失败降级到兜底 Planner
+# ═══════════════════════════════════════════════════════════════
+
+class _AlwaysFailPlanner(_PlannerStub):
+    """plan_batch 恒返回 None（模拟 LLM 内容层修复耗尽/格式错误）。"""
+
+    async def plan_batch(self, snapshot, goal, history):
+        self.calls.append({"goal": goal, "history_len": len(history)})
+        return None
+
+
+class _FallbackPlanner:
+    """兜底 Planner：总是返回一个确定动作，用于验证降级生效。"""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def plan_batch(self, snapshot, goal, history):
+        self.calls += 1
+        return [Action(action="click", params={"selector": "#fallback-btn"})]
+
+
+@pytest.mark.asyncio
+async def test_fallback_planner_engaged_after_consecutive_failures():
+    """连续失败 N 步后切换到兜底 Planner 而非直接中止（#51）。"""
+    snapshot = Snapshot(title="测试页", url="https://example.com")
+    observer = MagicMock()
+    observer.observe = AsyncMock(return_value=snapshot)
+    observer.observe_simplified = AsyncMock(return_value={})
+
+    main_planner = _AlwaysFailPlanner()
+    fallback = _FallbackPlanner()
+    tool = MagicMock()
+    tool.click = AsyncMock(return_value=Observation.ok(page_changed=True))
+    tool.current_url = "https://example.com"
+    tool.current_title = AsyncMock(return_value="测试页")
+
+    agent = Agent(
+        observer, main_planner, Executor(tool), max_steps=10,
+        fallback_planner=fallback, fallback_after_failures=2,
+    )
+    # 主 Planner 一直失败 → 第 2 次失败触发降级；此后兜底 Planner 产出动作
+    # （兜底总是返回 click，会继续执行直到 max_steps 或 done，这里验证降级发生即可）
+    obs = await agent.run("目标")
+    # 兜底 Planner 至少被调用过一次
+    assert fallback.calls >= 1
+    # 兜底动作被执行过
+    tool.click.assert_awaited()
+    # 由于兜底永不 done，最终以 max_steps 耗尽失败收场（而非「无法规划」中止）
+    assert obs.is_error
+
+
+@pytest.mark.asyncio
+async def test_no_fallback_means_abort_on_plan_failure():
+    """未配置 fallback_planner 时，规划失败直接中止（保持原行为，#51）。"""
+    snapshot = Snapshot(title="测试页", url="https://example.com")
+    observer = MagicMock()
+    observer.observe = AsyncMock(return_value=snapshot)
+    observer.observe_simplified = AsyncMock(return_value={})
+
+    planner = _AlwaysFailPlanner()
+    tool = MagicMock()
+    tool.current_url = "https://example.com"
+
+    agent = Agent(observer, planner, Executor(tool), max_steps=10)
+    obs = await agent.run("目标")
+    assert obs.is_error
+    assert "无法规划" in obs.error
+
+
+class _HumanPlanner(_PlannerStub):
+    """恒无法规划，由人工接管完成动作（#51 人工通道）。"""
+
+    async def plan_batch(self, snapshot, goal, history):
+        self.calls.append({"goal": goal})
+        return None
+
+
+@pytest.mark.asyncio
+async def test_human_in_the_loop_invoked_on_plan_failure():
+    """规划失败时调用人工接管回调，返回有效动作则执行并继续（#51）。"""
+    snapshot = Snapshot(title="测试页", url="https://example.com")
+    observer = MagicMock()
+    observer.observe = AsyncMock(return_value=snapshot)
+    observer.observe_simplified = AsyncMock(return_value={})
+
+    planner = _HumanPlanner()
+    tool = MagicMock()
+    tool.click = AsyncMock(return_value=Observation.ok(page_changed=True))
+    tool.current_url = "https://example.com"
+    tool.current_title = AsyncMock(return_value="测试页")
+
+    seen_ctx = {}
+
+    async def human(ctx):
+        seen_ctx.update(ctx)
+        return {"action": {"action": "click", "params": {"selector": "#human-btn"}}}
+
+    agent = Agent(
+        observer, planner, Executor(tool), max_steps=10,
+        human_in_the_loop=human,
+    )
+    obs = await agent.run("目标")
+    # 人工接管被执行过（回调返回的动作经 Executor 执行）
+    tool.click.assert_awaited()
+    # 回调收到的上下文包含 goal / snapshot_url / step / history
+    assert seen_ctx["goal"] == "目标"
+    assert seen_ctx["snapshot_url"] == "https://example.com"
+    assert seen_ctx["step"] >= 1
+    assert "history" in seen_ctx
+    # 人工动作永不 done，最终以 max_steps 耗尽失败收场（而非「无法规划」中止）
+    assert obs.is_error
+
+
+@pytest.mark.asyncio
+async def test_human_in_the_loop_no_action_aborts():
+    """人工接管返回空（无 action）→ 未配置 fallback 时仍中止（#51）。"""
+    snapshot = Snapshot(title="测试页", url="https://example.com")
+    observer = MagicMock()
+    observer.observe = AsyncMock(return_value=snapshot)
+    observer.observe_simplified = AsyncMock(return_value={})
+
+    planner = _HumanPlanner()
+    tool = MagicMock()
+    tool.current_url = "https://example.com"
+
+    async def human(ctx):
+        return {"feedback": "manual"}  # 只有反馈、无 action
+
+    agent = Agent(
+        observer, planner, Executor(tool), max_steps=10,
+        human_in_the_loop=human,
+    )
+    obs = await agent.run("目标")
+    assert obs.is_error
+    assert "无法规划" in obs.error
+
+
+@pytest.mark.asyncio
+async def test_human_in_the_loop_exception_falls_back():
+    """人工接管回调抛异常 → 按无人接管处理，走中止路径（#51）。"""
+    snapshot = Snapshot(title="测试页", url="https://example.com")
+    observer = MagicMock()
+    observer.observe = AsyncMock(return_value=snapshot)
+    observer.observe_simplified = AsyncMock(return_value={})
+
+    planner = _HumanPlanner()
+    tool = MagicMock()
+    tool.current_url = "https://example.com"
+
+    async def human(ctx):
+        raise RuntimeError("boom")
+
+    agent = Agent(
+        observer, planner, Executor(tool), max_steps=10,
+        human_in_the_loop=human,
+    )
+    obs = await agent.run("目标")
+    assert obs.is_error
+    assert "无法规划" in obs.error
+
+
+# ═══════════════════════════════════════════════════════════════
+# 待解决问题 #37：恢复延时可配置
+# ═══════════════════════════════════════════════════════════════
+
+class _ConfigRecoveryPlanner(_PlannerStub):
+    """配合恢复测试：先失败一次触发恢复，再成功。"""
+
+    def __init__(self, actions=None):
+        super().__init__(actions)
+        self._plan_calls = 0
+
+    async def plan_batch(self, snapshot, goal, history):
+        self._plan_calls += 1
+        # 第一次规划：让动作失败以触发页面恢复
+        if self._plan_calls == 1:
+            return [Action(action="click", params={"selector": "#boom"})]
+        return await super().plan_batch(snapshot, goal, history)
+
+
+@pytest.mark.asyncio
+async def test_recovery_pause_configurable():
+    """恢复延时可通过构造参数覆盖（待解决问题 #37，默认 0.5s）。"""
+    snapshot = Snapshot(title="测试页", url="https://example.com")
+    observer = MagicMock()
+    observer.observe = AsyncMock(return_value=snapshot)
+    observer.observe_simplified = AsyncMock(return_value={})
+
+    planner = _ConfigRecoveryPlanner([done("完成")])
+    tool = MagicMock()
+    tool.current_url = "https://example.com"
+    tool.current_title = AsyncMock(return_value="测试页")
+    # 第一次 click 失败 → 触发 back 恢复；back 成功
+    tool.click = AsyncMock(return_value=Observation.fail("点不到"))
+    tool.back = AsyncMock(return_value=Observation.ok())
+
+    agent = Agent(
+        observer, planner, Executor(tool), max_steps=10,
+        recovery_pause=0.0,
+    )
+    obs = await agent.run("目标")
+    # 恢复路径被触发（back 被调用）且任务能继续到 done
+    tool.back.assert_awaited()
+    assert obs.success is True

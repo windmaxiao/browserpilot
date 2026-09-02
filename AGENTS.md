@@ -270,6 +270,8 @@ class Snapshot:
 
 > V1.0 子计划 A：`click/input/select/download/upload` 五个元素定位方法均新增 `frame_path` 参数（元组，空为主页面，默认 `()`），按 iframe 定位段解析最终 Locator（见下方「iframe 定位」）。
 
+> V1.1 S3（待解决问题 #50）JS 弹窗处理：构造参数 `dialog_policy`（`auto_accept` 默认 / `auto_dismiss` / `manual`）与 `dialog_hook`（可选 async 回调 `(dialog, info)`，验证码等人工接管扩展点）。构造时注册 `page.on("dialog")`，按策略 accept/dismiss 并记录到 `dialogs()`；`SnapshotGenerator` 经 `dialog_provider=tool.dialogs` 填充 `Snapshot.dialogs` 供 Planner 感知。
+
 **BrowserManager** — 浏览器生命周期管理：
 
 | 方法 | 说明 |
@@ -278,6 +280,8 @@ class Snapshot:
 | `stop()` | 关闭浏览器及所有资源 |
 | `page` | 获取当前 Page 对象 |
 | `create_tool()` | 创建 BrowserTool 实例 |
+| `subscribe_page(cb)` / `unsubscribe_page(cb)` | 订阅/注销页面切换事件（V1.1 S3 #7，业务示例在 finally 中成对注销，防监听器与旧 Generator 泄漏） |
+| `switch_page(page)` | 切换当前活动页面并通知全部订阅者 |
 
 **iframe 定位（V1.0 子计划 A）：** BrowserTool 内部 `_locator(selector, frame_path)` 按 `(selector, frame_path)` 解析最终 Locator——空 frame_path 走 `page.locator(selector)`（主页面，向后兼容）；非空则逐层 `frame_locator(seg)` 穿透 iframe 再定位目标元素。
 
@@ -285,13 +289,16 @@ class Snapshot:
 
 从 Playwright Page 提取语义信息生成 Snapshot。
 
+> 构造参数（V1.1 S3）：`frame_load_timeout`（子帧加载等待超时，默认 2000ms）、`max_frames`（帧遍历总数上限，默认 20）、`max_depth`（递归深度上限，默认 5）、`frame_time_budget`（帧等待累计墙钟预算秒，默认 30）、`dialog_provider`（JS 弹窗记录回调，透传 `Snapshot.dialogs`，默认 None）。三重预算防深帧大页面（SAP 类 5 层）Observe 无上界拖垮流程（待解决问题 #6）。
+
 | 方法 | 说明 |
 |------|------|
 | `generate()` | 生成完整 Snapshot（递归 iframe，逐 scope 批量提取） |
 | `detect_page_type()` | 通过 URL/Title 推断页面类型 |
-| `_iter_scopes()` / `_walk_scopes()` | 递归遍历 frame 树（主页面 + 嵌套 iframe），每个子 frame 做有限超时加载等待（`asyncio.wait_for` 兜底），超时跳过该帧 |
+| `_iter_scopes()` / `_walk_scopes()` | 递归遍历 frame 树（主页面 + 嵌套 iframe），每个子 frame 做有限超时加载等待（`asyncio.wait_for` 兜底），超时跳过该帧；按 max_frames/max_depth/frame_time_budget 三重预算截断 |
 | `_frame_segments()` | 为同一父 document 内 iframe 生成唯一定位段（id → name → 位置 `nth=j`）；重复 id/name 一律改用位置索引消歧 |
-| `_extract_scope()` | 单 scope 提取：真实 Frame/Page 一次 `frame.evaluate` 返回 6 类原始数据（含可点击文本）；Mock 回退逐元素 |
+| `_extract_scope()` | 单 scope 提取：真实 Frame/Page 一次 `frame.evaluate` 返回 6 类原始数据（含可点击文本），evaluate 包 `asyncio.wait_for` 兜底；Mock 回退逐元素 |
+| `_collect_dialogs()` | 读取 `dialog_provider` 提供的 JS 弹窗记录填充 `Snapshot.dialogs`（V1.1 S3 #50） |
 | `_extract_buttons()` | button, [role=button], input[submit], a[class*=btn], [class*=button] |
 | `_extract_inputs()` | input(非hidden), textarea, contenteditable, [role=textbox] |
 | `_extract_links()` | a[href] |
@@ -309,12 +316,15 @@ class Snapshot:
 
 ```python
 class Agent:
-    def __init__(self, observer, planner, executor, max_steps=50)
+    def __init__(self, observer, planner, executor, max_steps=50,
+                 max_recoveries=2, recovery_pause=0.5,
+                 fallback_planner=None, fallback_after_failures=3,
+                 human_in_the_loop=None)
 ```
 
 | 方法 | 说明 |
 |------|------|
-| `run(goal, timeout_seconds)` | 完整 Agent 循环：先尝试 `planner.decompose()`，成功走步骤模式，否则走自由模式；`timeout_seconds` 为可选总执行超时（墙钟，兜底 max_steps） |
+| `run(goal, timeout_seconds)` | 完整 Agent 循环：先尝试 `planner.decompose()`，成功走步骤模式，否则走自由模式；`timeout_seconds` 为可选总执行超时（墙钟，兜底 max_steps）；超时取消落在 Playwright 调用中途时主动 refresh 复位页面（V1.1 S3 #25） |
 | `step(action)` | 单步执行（手动/调试模式） |
 | `observe()` | 获取当前页面 Snapshot |
 
@@ -326,6 +336,7 @@ class Agent:
 - Step 索引从 1 开始
 - **失败自动重试（V0.4）**：机械重试 1 次 → Reflection（LLM 分析失败给出替代动作）1 次 → 仍失败尝试页面恢复（back/refresh）→ 仍失败中止任务；机械重试**不替换 Snapshot**——iframe 目标经 `_pinned_retry_action()` 以原始 Snapshot 中该元素的显式 selector 固定定位，避免重新 Observe 后 element_id 重编号导致旧 target_id 命中错位元素（2026-08-27 修复）
 - Planner 返回 None 表示无法规划
+- **规划降级与人工接管（V1.1 S3 #51）**：自由模式规划失败不立即中止——配置 `fallback_planner`（如 RuleBasedPlanner）时，连续失败未达 `fallback_after_failures` 阈值则重试规划，达阈值切换到兜底 Planner（仅切换一次，兜底再失败达阈值才中止）；`human_in_the_loop` 为可选同步/异步回调 `(ctx) -> {"action": {...}}`，在降级后仍无法规划时调用，返回有效动作则执行并推进步数（成功清零失败计数），返回空/抛异常则走中止路径。`recovery_pause` 控制页面恢复后等待稳定的延时（默认 0.5s，V1.1 S3 #37）
 - **异常防护**：`_safe_observe()` / `_safe_execute()` 捕获浏览器关闭等异常，优雅返回失败 Observation 而非崩溃
 - **停滞检测**：自由模式连续 2 次 wait 且页面无变化 → 提前终止；仅对 `Planner.stagnation_detection=True`（默认）的规划器生效——`RuleBasedPlanner` 覆盖为 `False`（自身用 `_WAIT_MAX_TRIES` 控制等待次数，不被截断）；计划内 wait 步骤不计入（步骤模式不做该检测，队列必然推进）
 - **重复动作检测（V1.0 批量增强）**：页面未变化时连续对同一目标执行相同动作（input/click/select/scroll），连续 `_MAX_REPEAT_SKIPS=3` 次即判停滞终止，防止 LLM 反复填同一字段
@@ -480,20 +491,20 @@ OpenAI 兼容 Chat Completions 适配器；API Key 只从 `OPENAI_API_KEY` 环�
 - ✅ **iframe 支持（V1.0 子计划 A）**：`ElementInfo` 新增 `frame_path`（元组，空为主页面）；`SnapshotGenerator` 递归遍历多层 iframe（`_iter_scopes`/`_walk_scopes`/`_frame_segments`，重复 id/name 用位置 `nth=j` 消歧，子 frame 加载有限超时跳过）；`Executor` 构建 `element_id → frame_path` 映射（target_id 优先于注入 selector）；`BrowserTool._locator` 逐层 `frame_locator` 穿透；frame 失效后重新 Observe 再解析；真实 Playwright 浏览器三层 iframe fixture 测试（`test_snapshot_frame.py`）
 - ✅ **Memory（V0.5）**：`HistoryMemory` 增量式历史记忆（滚动摘要：超出窗口的旧条目按批折叠，默认 `window=5, batch=10`，可注入异步 LLM 摘要器）、`summarize_entries()` 规则式摘要（不含输入值/URL 等敏感内容）、上下文压缩（`context_entries()` = 摘要 + 最近窗口，摘要不占窗口名额）、`serialize_history` / `build_user_prompt` 摘要协议、Agent `_record_step()` 同步记录 + `plan_with_history` / `plan_step` / `reflect` 传压缩上下文
 - ✅ **批量规划（V1.0 自由模式增强）**：`plan_batch()` 一次 LLM 返回最多 10 个动作（`BATCH_SYSTEM_PROMPT` / `build_hybrid_schema` 混合 schema / `parse_action_list` 兼容单/批量输出），同 Snapshot 连续执行、任一失败/页面变化/done 即断批；`Planner.plan_batch` 默认退化为单动作保证兼容；**重复动作检测**（页面未变化时连续 `_MAX_REPEAT_SKIPS=3` 次相同动作判停滞）；**`run(goal, timeout_seconds)`** 墙钟超时兜底
+- ✅ **稳定性与降级韧性（V1.1 S3，2026-09-02）**：① **JS 弹窗应对（#50）**——`BrowserTool` 注册 `page.on("dialog")`，`dialog_policy`（auto_accept/auto_dismiss/manual）+ `dialog_hook` 人工接管扩展点，记录到 `dialogs()`；`SnapshotGenerator` 经 `dialog_provider` 填充 `Snapshot.dialogs` 供 Planner 感知；② **规划降级（#51）**——`Agent` 支持 `fallback_planner` 连续失败 `fallback_after_failures` 步切换兜底 Planner + `human_in_the_loop` 人工接管回调（返回 action 则执行并推进步数）；③ **帧遍历预算（#6）**——`SnapshotGenerator` 新增 `max_frames`/`max_depth`/`frame_time_budget` 三重预算 + `_EXTRACT_JS` evaluate 包 `asyncio.wait_for`；④ **订阅可注销（#7）**——`BrowserManager.unsubscribe_page`，业务示例 finally 成对注销；⑤ **超时复位（#25）**——`run(timeout_seconds)` 超时后主动 refresh 复位页面；⑥ **恢复延时可配置（#37）**——`Agent(recovery_pause=...)` 替代硬编码 0.5s
 - ✅ **接口契约加固（M4，2026-08-24 评审修复）**：自由模式 `plan_batch` 改 `getattr` 逐级回退（`plan_batch → plan_with_history → plan`），V0.3 鸭子类型 Planner 不再崩溃；基类声明 history 摘要条目契约（breaking change）；停滞检测按 `Planner.stagnation_detection` 启用（`RuleBasedPlanner` 覆盖 `False`，`_WAIT_MAX_TRIES=10` 不再被截断）
 - ✅ **文件路径安全（M5，2026-08-24/27 评审修复）**：模型 download `save_path` 双防线无条件剥离（`parse_action_dict` + Executor 层，落盘目录仅由 `Executor.download_dir` 决定）；`BrowserTool.download` 新增 `download_dir` 目录参数（优先于 save_path，目录与 `suggested_filename` 拼接）；upload 强制目录白名单（`allowed_upload_dirs` 未配置即拒绝、`LLMPlanner` 透传、Executor 二次校验）；`schema/action.py` 纯函数 `is_path_within_allowed` 改用 `Path.resolve()` 解析符号链接/junction，防白名单目录内链接指向外部路径绕过
-- ✅ 16 个测试文件，400+ 个用例（Schema / Executor / Planner / BrowserTool / SnapshotGenerator / Snapshot iframe / Agent 集成 / LLMClient / 序列化 / LLMPlanner / Memory / Logging / TaskQueue）
+- ✅ 16 个测试文件，440+ 个用例（Schema / Executor / Planner / BrowserTool / SnapshotGenerator / Snapshot iframe / Agent 集成 / LLMClient / 序列化 / LLMPlanner / Memory / Logging / TaskQueue）
 - ✅ 5 个 Demo（手动 / 规则 Agent 本地页 / 规则 Agent 百度 / LLM Agent 自由模式 / LLM Agent 两阶段真实百度，端到端跑通）+ 1 个业务示例（`examples/ex_robot/ydgx`：LLM 局部辅助 + 多层 iframe + 失败回退确定性，不入 git）
 
 ### 已知问题（详见 [待解决问题.md](待解决问题.md)，下表为摘要）
 
 | # | 问题 | 优先级 | 状态 |
 |---|------|--------|------|
-| #4 | download 直接拼接 `suggested_filename` 落盘，不可信文件名存在路径穿越面 | 🔴 | 待修复 |
 | #5 | texts 含 span 噪音 | 🟡 | ⏸️ 暂不处理 |
 | — | 规则 7「点击首条结果」非死代码，设计取舍保留（本文件自管，未入 待解决问题.md） | 🟡 | 🔒 保留 |
 
-> 完整列表见 [待解决问题.md](待解决问题.md)：当前跟踪 46 项（🔴 1、🟡 12、🟢 33、⏸️ 1），已解决条目随修复移除，编号不复用。2026-08-27 修复三项：文件路径白名单 `Path.resolve()` 防符号链接/junction 绕过、download 新增 `download_dir` 目录参数且 Executor 无条件剥离 `save_path`、iframe 动作机械重试固定显式 selector 定位（不再刷新 Snapshot）；更早修复历史见该文件「最近移除」。
+> 完整列表见 [待解决问题.md](待解决问题.md)：当前跟踪 28 项（🔴 0、🟡 2、🟢 25、⏸️ 1），已解决条目随修复移除，编号不复用。2026-09-02 完成 S1（正确性 12 项）、S2（安全与执行契约 6 项，🔴 #4 清零）、S3（稳定性与降级韧性 6 项：#6/#7/#25/#37/#50/#51）；2026-08-27 修复三项：文件路径白名单 `Path.resolve()` 防符号链接/junction 绕过、download 新增 `download_dir` 目录参数且 Executor 无条件剥离 `save_path`、iframe 动作机械重试固定显式 selector 定位（不再刷新 Snapshot）；更早修复历史见该文件「最近移除」。
 
 ---
 

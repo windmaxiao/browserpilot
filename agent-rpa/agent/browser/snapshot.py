@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from typing import Callable, Optional
 
 from loguru import logger
 from playwright.async_api import Page
@@ -162,12 +163,30 @@ class SnapshotGenerator:
         "}"
     )
 
-    def __init__(self, page: Page, frame_load_timeout: int = 2000):
+    def __init__(
+        self,
+        page: Page,
+        frame_load_timeout: int = 2000,
+        max_frames: int = 20,
+        max_depth: int = 5,
+        frame_time_budget: float = 30.0,
+        dialog_provider: Optional[Callable[[], list]] = None,
+    ):
         self._page = page
         self._element_counter = 0
         # V1.0 #5：子 frame 加载等待超时（毫秒），延迟加载帧超时即跳过
         # 深嵌套 iframe（如多层 SAP）加载慢时可调大，避免观察时漏帧
         self._frame_load_timeout = frame_load_timeout
+        # 待解决问题 #6：帧遍历预算。SAP 类 5 层大页面最坏耗时 = 帧数×单帧超时，
+        # 无上界会复现 500s+ 卡死。max_frames 限制总遍历帧数、max_depth 限制
+        # 递归深度、frame_time_budget 为帧等待累计墙钟预算（秒），超预算立即停止
+        # 深入并截断。避免恶意/异常深帧页拖垮整次 Observe。
+        self._max_frames = max(1, max_frames)
+        self._max_depth = max(1, max_depth)
+        self._frame_time_budget = max(0.0, frame_time_budget)
+        # 待解决问题 #50：从调用方（通常是 BrowserTool）读取 JS 弹窗记录，
+        # 填充 Snapshot.dialogs 供 Planner 感知；未提供回调时保持空列表（默认）。
+        self._dialog_provider = dialog_provider
         logger.debug("SnapshotGenerator 创建")
 
     def set_page(self, page: Page) -> None:
@@ -231,8 +250,25 @@ class SnapshotGenerator:
             links=links,
             texts=texts,
             selects=selects,
+            dialogs=self._collect_dialogs(),
             loading=loading,
         )
+
+    def _collect_dialogs(self) -> list[dict]:
+        """读取调用方提供的 JS 弹窗记录（待解决问题 #50）。
+
+        调用方（通常是 BrowserTool）已按策略 accept/dismiss 并记录，此处仅透传
+        到 Snapshot.dialogs 供 Planner 感知（如「点击删除后页面弹确认框已自动
+        接受」）。未配置 dialog_provider 时保持默认空列表。
+        """
+        if self._dialog_provider is None:
+            return []
+        try:
+            dialogs = self._dialog_provider()
+            return [d for d in dialogs if isinstance(d, dict)]
+        except Exception as e:
+            logger.debug("读取 JS 弹窗记录失败: {}", e)
+            return []
 
     # ── iframe scope 遍历（V1.0 子计划 A）───────────────────────────
 
@@ -251,14 +287,34 @@ class SnapshotGenerator:
         if not isinstance(self._page, _Page):
             return [(self._page, ())]
         scopes: list[tuple] = []
-        await self._walk_scopes(self._page.main_frame, (), scopes)
+        # 帧遍历预算计数在单次 generate 内累计（待解决问题 #6）
+        self._frames_seen = 0
+        self._frame_wait_total = 0.0
+        await self._walk_scopes(self._page.main_frame, (), scopes, depth=0)
         return scopes
 
     async def _walk_scopes(
-        self, frame, frame_path: tuple, scopes: list
+        self, frame, frame_path: tuple, scopes: list, *, depth: int
     ) -> None:
-        """递归遍历 frame 树：进入每个 iframe 与其可见元素 scope。"""
+        """递归遍历 frame 树：进入每个 iframe 与其可见元素 scope。
+
+        待解决问题 #6：加帧数 / 深度 / 时间三重预算，超限即停止深入并记录
+        告警——防止深帧大页面（SAP 类 5 层）单次 Observe 无上界拖垮流程。
+        """
         scopes.append((frame, frame_path))
+        # 帧数上限：超过 max_frames 不再继续深入（主帧已计入，故预扣 1）
+        if self._frames_seen + 1 >= self._max_frames:
+            logger.warning(
+                "帧遍历超上限（max_frames={}）中止，未遍历全部帧",
+                self._max_frames,
+            )
+            return
+        # 深度上限：避免恶意无限嵌套 iframe
+        if depth >= self._max_depth:
+            logger.warning(
+                "帧遍历超深度上限（max_depth={}）中止", self._max_depth,
+            )
+            return
         try:
             iframe_els = await frame.query_selector_all("iframe, frame, object")
         except Exception:
@@ -273,6 +329,14 @@ class SnapshotGenerator:
                 child = None
             if child is None:
                 continue  # iframe 尚未挂载
+            self._frames_seen += 1
+            # 时间预算：帧等待（含成功与失败）累计墙钟，超过后停止深入
+            if self._frame_wait_total >= self._frame_time_budget:
+                logger.warning(
+                    "帧等待累计超时间预算 {:.1f}s，中止深入",
+                    self._frame_time_budget,
+                )
+                break
             # V1.0 #5：对子 frame 做有限超时加载等待，延迟加载的空帧跳过，
             # 不使全局 Snapshot 失败（仅记录告警）。
             # 用 asyncio.wait_for 兜底：个别页面帧在 Playwright 内部可能不按
@@ -284,7 +348,9 @@ class SnapshotGenerator:
                     child.wait_for_load_state("load"),
                     timeout=self._frame_load_timeout / 1000,
                 )
+                self._frame_wait_total += time.time() - t_wait
             except Exception as e:
+                self._frame_wait_total += time.time() - t_wait
                 logger.warning(
                     "iframe 加载等待超时/失败，跳过该帧 | path={} | 等待 {:.2f}s | err={}",
                     frame_path + (seg,), time.time() - t_wait, e,
@@ -294,7 +360,7 @@ class SnapshotGenerator:
                 "iframe 加载完成 | path={} | 等待 {:.2f}s",
                 frame_path + (seg,), time.time() - t_wait,
             )
-            await self._walk_scopes(child, frame_path + (seg,), scopes)
+            await self._walk_scopes(child, frame_path + (seg,), scopes, depth=depth + 1)
 
     async def _frame_segments(self, iframe_els: list) -> list[str]:
         """为同一父 document 内的 iframe 元素生成唯一定位段。
@@ -461,9 +527,18 @@ class SnapshotGenerator:
                 await self._extract_selects(scope, frame_path),
             )
         try:
-            data = await scope.evaluate(self._EXTRACT_JS) or {}
+            # 待解决问题 #6：批量提取的 evaluate 也包 wait_for —— 帧级加载等待有
+            # 超时兜底，但执行层的 CDP 调用若无拦截，恶意/异常页可令其挂起拖垮整次
+            # Observe。用与 frame_load_timeout 同源的超时（毫秒），超时按空帧返回。
+            data = await asyncio.wait_for(
+                scope.evaluate(self._EXTRACT_JS),
+                timeout=self._frame_load_timeout / 1000,
+            ) or {}
         except Exception as e:
-            logger.warning("批量提取失败，该帧返回空 | path={} | err={}", frame_path, e)
+            logger.warning(
+                "批量提取失败/超时，该帧返回空 | path={} | err={}",
+                frame_path, e,
+            )
             data = {}
         # clickables（带交互属性的 p/span/div）合并到 buttons 作为可交互元素，供 LLM 点击
         buttons = self._build_infos(

@@ -155,6 +155,45 @@ async def test_main_frame_zero_regression(page):
 
 
 # ═══════════════════════════════════════════════════════════════
+# 待解决问题 #6：帧遍历预算（max_frames / max_depth / frame_time_budget）
+# ═══════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_max_frames_truncates_deep_iframes(page):
+    """max_frames=1 只遍历主页面：iframe 元素不被提取（#6）"""
+    snap = await SnapshotGenerator(page, max_frames=1).generate()
+    texts = {it.text for it in snap.texts}
+    buttons = {it.text for it in snap.buttons}
+    assert "顶层页面" in texts
+    assert "顶层按钮" in buttons
+    assert "第二层 iframe" not in texts
+    assert "第三层 iframe" not in texts
+
+
+@pytest.mark.asyncio
+async def test_max_depth_truncates_nested_iframes(page):
+    """max_depth=1 只深入一层：第二层元素在、第三层元素不在（#6）"""
+    snap = await SnapshotGenerator(page, max_depth=1).generate()
+    texts = {it.text for it in snap.texts}
+    buttons = {it.text for it in snap.buttons}
+    assert "顶层页面" in texts
+    assert "第二层 iframe" in texts
+    assert "第二层按钮" in buttons
+    assert "第三层 iframe" not in texts
+    assert "第三层按钮" not in buttons
+
+
+@pytest.mark.asyncio
+async def test_frame_time_budget_zero_skips_iframes(page):
+    """frame_time_budget=0 立即触发时间预算：不深入任何 iframe（#6）"""
+    snap = await SnapshotGenerator(page, frame_time_budget=0.0).generate()
+    texts = {it.text for it in snap.texts}
+    assert "顶层页面" in texts
+    assert "第二层 iframe" not in texts
+    assert "第三层 iframe" not in texts
+
+
+# ═══════════════════════════════════════════════════════════════
 # A-2 执行可达：BrowserTool / Executor 穿透 iframe 定位
 # ═══════════════════════════════════════════════════════════════
 

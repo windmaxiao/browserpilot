@@ -28,6 +28,10 @@ def make_page_mock():
     page.title = AsyncMock(return_value="页面标题")
     page.wait_for_load_state = AsyncMock()
     page.url = "https://example.com"
+    # BrowserTool 构造时 page.on("dialog", ...)（待解决问题 #50）。
+    # 真实 Playwright 的 on 是同步注册；用同步 MagicMock 避免 AsyncMock 产生
+    # "coroutine was never awaited" 警告。
+    page.on = MagicMock()
     # _page_fingerprint 跨 frame 遍历（#5），Mock 仅主页面一个 frame
     page.frames = [page]
     return page, locator
@@ -162,6 +166,7 @@ class TestPageFingerprint:
     async def test_fingerprint_returns_dict(self):
         page = AsyncMock()
         page.frames = [page]
+        page.on = MagicMock()  # BrowserTool 构造注册 dialog 回调，同步 on 避免未 await 警告
         page.evaluate = AsyncMock(
             return_value={"elements": 5, "text_len": 10}
         )
@@ -176,6 +181,7 @@ async def test_fingerprint_accumulates_across_frames():
     main = AsyncMock()
     sub = AsyncMock()
     main.frames = [main, sub]
+    main.on = MagicMock()  # BrowserTool 构造注册 dialog 回调，同步 on 避免未 await 警告
     main.evaluate = AsyncMock(
         return_value={"elements": 5, "text_len": 10}
     )
@@ -511,3 +517,111 @@ class TestScreenshot:
         obs = await tool.screenshot()
         assert obs.is_error is True
         assert "截图失败" in obs.error
+
+
+# ═══════════════════════════════════════════════════════════════
+# 待解决问题 #50：JS 弹窗监听与策略
+# ═══════════════════════════════════════════════════════════════
+
+class _FakeDialog:
+    """最小 dialog 桩：记录 accept/dismiss 调用。"""
+
+    def __init__(self, type="alert", message="确认?"):
+        self.type = type
+        self.message = message
+        self.accepted = False
+        self.dismissed = False
+
+    async def accept(self):
+        self.accepted = True
+
+    async def dismiss(self):
+        self.dismissed = True
+
+
+class TestDialog:
+    """JS 弹窗处理策略（#50）"""
+
+    @pytest.mark.asyncio
+    async def test_auto_accept_policy_accepts_dialog(self):
+        """默认 auto_accept：dialog 被 accept 且记录到 dialogs()"""
+        page, _ = make_page_mock()
+        tool = BrowserTool(page)
+        # 取回构造时注册的回调
+        handler = page.on.call_args[0][1]
+        dialog = _FakeDialog(type="confirm", message="确定删除?")
+        await handler(dialog)
+        assert dialog.accepted is True
+        assert dialog.dismissed is False
+        recs = tool.dialogs()
+        assert len(recs) == 1
+        assert recs[0]["type"] == "confirm"
+        assert recs[0]["handled"] is True
+        assert recs[0]["policy"] == "auto_accept"
+
+    @pytest.mark.asyncio
+    async def test_auto_dismiss_policy_dismisses_dialog(self):
+        """auto_dismiss：dialog 被 dismiss"""
+        page, _ = make_page_mock()
+        tool = BrowserTool(page, dialog_policy="auto_dismiss")
+        handler = page.on.call_args[0][1]
+        dialog = _FakeDialog(type="beforeunload", message="离开?")
+        await handler(dialog)
+        assert dialog.dismissed is True
+        assert dialog.accepted is False
+
+    @pytest.mark.asyncio
+    async def test_dialog_hook_receives_dialog(self):
+        """dialog_hook 人工接管：回调被调用并决定处理方式（#50 扩展点）"""
+        page, _ = make_page_mock()
+        seen = {}
+
+        async def hook(dialog, info):
+            seen["type"] = dialog.type
+            await dialog.dismiss()  # 人工决定拒绝
+
+        tool = BrowserTool(page, dialog_policy="manual", dialog_hook=hook)
+        handler = page.on.call_args[0][1]
+        dialog = _FakeDialog(type="confirm", message="验证码?")
+        await handler(dialog)
+        assert seen.get("type") == "confirm"
+        assert dialog.dismissed is True
+        recs = tool.dialogs()
+        assert recs[0]["policy"] == "manual"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 待解决问题 #7：页面订阅可注销
+# ═══════════════════════════════════════════════════════════════
+
+class TestSubscribeUnsubscribe:
+    """subscribe_page / unsubscribe_page（#7）"""
+
+    def test_unsubscribe_stops_callback(self):
+        from agent.browser.playwright import BrowserManager
+
+        mgr = BrowserManager()
+        calls = []
+        cb = lambda p: calls.append(p)
+        mgr.subscribe_page(cb)
+        p1 = MagicMock()
+        p2 = MagicMock()
+        mgr.switch_page(p1)
+        assert len(calls) == 1
+        mgr.unsubscribe_page(cb)
+        mgr.switch_page(p2)
+        assert len(calls) == 1  # 注销后不再回调
+
+    def test_unsubscribe_removes_single_callback(self):
+        from agent.browser.playwright import BrowserManager
+
+        mgr = BrowserManager()
+        calls_a, calls_b = [], []
+        cb_a = lambda p: calls_a.append(p)
+        cb_b = lambda p: calls_b.append(p)
+        mgr.subscribe_page(cb_a)
+        mgr.subscribe_page(cb_b)
+        mgr.unsubscribe_page(cb_a)
+        mgr.switch_page(MagicMock())
+        assert len(calls_a) == 0
+        assert len(calls_b) == 1  # 只移除指定的那个

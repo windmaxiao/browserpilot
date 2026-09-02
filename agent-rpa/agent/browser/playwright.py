@@ -47,15 +47,65 @@ class BrowserTool:
         self,
         page: Page,
         on_page_changed: Optional[Callable[[Page], None]] = None,
+        dialog_policy: str = "auto_accept",
+        dialog_hook: Optional[Callable] = None,
     ):
         """参数:
             page: 当前活动 Page。
             on_page_changed: 点击打开新标签页并自动跟随时的回调
                              （由 BrowserManager 传入，用于同步当前页面）。
+            dialog_policy: JS 弹窗处理策略（待解决问题 #50），可选：
+                - "auto_accept"（默认）：自动接受 (alert 直接 accept，confirm 确认)；
+                - "auto_dismiss"：自动拒绝/取消；
+                - "manual"：不做自动处理，交由 dialog_hook 决定（用于验证码等
+                  人工接管扩展点）；若不提供 hook 则仅记录并 accept 以免悬挂。
+            dialog_hook: 可选的 dialog 处理器，async def (dialog, info) -> None，
+                由调用方按业务策略 accept/dismiss（如弹窗人工接管、验证码打码）。
         """
         self._page = page
         self._on_page_changed = on_page_changed
+        self._dialog_policy = dialog_policy
+        self._dialog_hook = dialog_hook
+        # 待解决问题 #50：记录本次会话出现的 JS 弹窗（dialog），SnapshotGenerator
+        # 经 dialog_provider 读取后填充 Snapshot.dialogs 供 Planner 感知。
+        self._dialogs: list[dict] = []
+        # only 注册一次（构造时 page 已就绪），页面切换由 BrowserManager 保证
+        page.on("dialog", self._handle_dialog)
         logger.debug("BrowserTool 创建 | URL: {}", page.url)
+
+    def dialogs(self) -> list[dict]:
+        """返回本次会话已出现的 JS 弹窗记录（待解决问题 #50）。"""
+        return list(self._dialogs)
+
+    async def _handle_dialog(self, dialog) -> None:
+        """JS 弹窗统一入口（待解决问题 #50）：按策略处理并记录。
+
+        原始 Playwright 未注册监听时，alert/confirm/beforeunload 会被默认自动
+        关闭（confirm 按「取消」处理），「点击删除→确认」类流程可能静默走错分支；
+        悬挂的 dialog 还会导致后续动作超时。此处按可配置策略显式 accept/dismiss。
+        """
+        d_type = dialog.type
+        d_msg = dialog.message
+        info = {"type": d_type, "message": d_msg}
+        try:
+            if self._dialog_hook is not None:
+                await self._dialog_hook(dialog, info)
+            elif self._dialog_policy == "auto_dismiss":
+                await dialog.dismiss()
+            else:  # auto_accept / manual 兜底（无 hook 时 accept 避免悬挂）
+                await dialog.accept()
+            info["handled"] = True
+        except Exception as e:
+            logger.warning("JS 弹窗处理失败 type={} | err={}", d_type, e)
+            info["handled"] = False
+            info["error"] = str(e)
+            try:
+                await dialog.dismiss()
+            except Exception:
+                pass
+        info["policy"] = self._dialog_policy
+        self._dialogs.append(info)
+        logger.info("JS 弹窗 type={} policy={} | message={}", d_type, self._dialog_policy, d_msg)
 
     # ── 页面属性 ────────────────────────────────────────────────────
 
@@ -717,3 +767,12 @@ class BrowserManager:
     def subscribe_page(self, callback) -> None:
         """订阅页面切换事件：跟随新标签页后回调 callback(page)。"""
         self._page_listeners.append(callback)
+
+    def unsubscribe_page(self, callback) -> None:
+        """取消订阅页面切换事件（待解决问题 #7）。
+
+        业务示例在 `run_llm_segment` 等长流程中会订阅多个 SnapshotGenerator；
+        若只订阅不注销，`switch_page` 会向全部历史回调派发且旧 Generator 持有
+        旧 Page 引用滞留在内存。配合 subscribe_page 在资源释放处成对调用。
+        """
+        self._page_listeners.remove(callback)
