@@ -7,6 +7,7 @@ Executor 是 Agent 与 Browser Tool 之间的桥梁。
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional
 
@@ -91,17 +92,20 @@ class Executor:
         errors = action.validate()
         if errors:
             logger.warning("Action 验证失败: {}", "; ".join(errors))
-            return Observation.fail(
-                error=f"Action 验证失败: {'; '.join(errors)}",
-            )
+            return self._fail(f"Action 验证失败: {'; '.join(errors)}")
 
         handler = self._dispatch.get(action.action)
         if handler is None:
             logger.error("未知动作类型: {}", action.action)
-            return Observation.fail(error=f"未知动作: {action.action}")
+            return self._fail(f"未知动作: {action.action}")
 
         logger.debug("分发动作: {} | target={} | target_id={}", action.action, action.target, action.target_id)
-        return await handler(action)
+        observation = await handler(action)
+        # 待解决问题 #28：Executor 层失败路径统一附 url（浏览器关闭时为 None），
+        # 使 serialize_history 等依赖 observation.url 的环节不丢 URL 上下文
+        if observation is not None and observation.is_error and not observation.url:
+            return replace(observation, url=self._current_url())
+        return observation
 
     # ── 各动作的具体执行 ────────────────────────────────────────────
 
@@ -184,8 +188,12 @@ class Executor:
         ms = action.params.get("ms")
         if ms is None and action.value:
             try:
-                ms = int(str(action.value).strip())
-            except ValueError:
+                # 待解决问题 #10：value 可能是浮点字符串（parse 层强转，如
+                # "5000.0"），先 float 再 int，避免 int("5000.0") 抛 ValueError
+                # 静默回退 1000ms；仍无法解析时记录告警再回退。
+                ms = int(float(str(action.value).strip()))
+            except (TypeError, ValueError):
+                logger.warning("wait 的 value 无法解析为毫秒: {!r} → 回退 1000ms", action.value)
                 ms = None
         if ms is None:
             ms = 1000
@@ -264,6 +272,17 @@ class Executor:
 
     # ── 辅助方法 ────────────────────────────────────────────────────
 
+    def _current_url(self) -> Optional[str]:
+        """安全获取当前页面 URL；浏览器已关闭时返回 None（待解决问题 #28）。"""
+        try:
+            return self._tool.current_url
+        except Exception:
+            return None
+
+    def _fail(self, error: str) -> Observation:
+        """失败 Observation 并附带当前页面 URL（浏览器关闭时为 None，待解决问题 #28）。"""
+        return Observation.fail(error=error, url=self._current_url())
+
     def _build_element_map(self, snapshot: Snapshot) -> dict[str, str]:
         """
         从 Snapshot 构建 element_id → selector 的映射。
@@ -292,17 +311,31 @@ class Executor:
 
     def _resolve_frame_path(self, action: Action) -> tuple:
         """
-        解析目标元素的 frame_path（V1.0 子计划 A）。
+        解析目标元素的 frame_path（V1.0 子计划 A + 待解决问题 #40）。
 
         优先级：
         1. target_id 命中当前 Snapshot → 从 frame_path 映射查询
            （parse_action_dict 会为命中元素注入本地 selector，二者同源；
              若先判 params["selector"] 会把 iframe 元素降级为主页面——待解决问题 #1）
-        2. params["selector"] 显式指定 → 主页面（空元组）
-        3. 其他 → 主页面（空元组）
+        2. params["frame_path"] 显式指定（#40：手动构造 / 规则注入 Action 携带
+           iframe 链，须为字符串数组；格式非法时告警并按主页面处理）
+        3. params["selector"] 显式指定 → 主页面（空元组）
+        4. 其他 → 主页面（空元组）
+
+        边界说明（#40）：selector / frame_path 直通模式仅由调用方在知晓 iframe
+        结构的前提下使用（手动调试、自定义 Planner）；LLM 链路一律经 target_id
+        映射，无需手填 frame_path。
         """
         if action.target_id and action.target_id in self._frame_map:
             return self._frame_map[action.target_id]
+        fp = action.params.get("frame_path")
+        if fp is not None:
+            if isinstance(fp, (list, tuple)) and all(isinstance(s, str) for s in fp):
+                return tuple(fp)
+            logger.warning(
+                "params['frame_path'] 格式非法（应为字符串数组），按主页面处理: {!r}", fp,
+            )
+            return ()
         if action.params.get("selector"):
             return ()
         return ()

@@ -131,7 +131,11 @@ class Agent:
     async def _run_body(self, goal: str) -> Observation:
         """run() 的执行体：由 Planner 是否支持拆解决定步骤 / 自由模式。"""
         decompose = getattr(self._planner, "decompose", None)
-        steps = await decompose(goal) if decompose is not None else None
+        # 待解决问题 #15：decompose 异常视为拆解失败，走自由模式而非击穿主循环
+        steps = (
+            await self._safe_plan(decompose(goal), label="decompose")
+            if decompose is not None else None
+        )
         if steps:
             return await self._run_with_steps(goal, steps)
         return await self._run_free(goal)
@@ -168,17 +172,21 @@ class Agent:
             logger.info("📝 [Step {}/{}] 规划动作...", self._current_step + 1, self._max_steps)
             planner = self._planner
             plan_batch = getattr(planner, "plan_batch", None)
+            # 待解决问题 #15：Planner 协程异常一律视为「本轮无法规划」，走既有降级路径
             if plan_batch is not None:
-                actions = await plan_batch(
-                    snapshot, goal, self._memory.context_entries(),
+                actions = await self._safe_plan(
+                    plan_batch(snapshot, goal, self._memory.context_entries()),
+                    label="plan_batch",
                 )
             else:
                 plan_wh = getattr(planner, "plan_with_history", None)
-                action = (
-                    await plan_wh(snapshot, goal, self._memory.context_entries())
-                    if plan_wh is not None
-                    else await planner.plan(snapshot, goal)
-                )
+                if plan_wh is not None:
+                    coro = plan_wh(snapshot, goal, self._memory.context_entries())
+                    action = await self._safe_plan(coro, label="plan_with_history")
+                else:
+                    action = await self._safe_plan(
+                        planner.plan(snapshot, goal), label="plan",
+                    )
                 actions = [action] if action is not None else None
             if not actions:
                 logger.warning("⚠️  无法规划出有效动作")
@@ -210,7 +218,9 @@ class Agent:
                     and last_fp is not None
                     and action.action in ("input", "click", "select", "scroll")
                 ):
-                    current_fp = (action.action, action.target_id)
+                    # 待解决问题 #12：指纹纳入语义参数（value/direction+amount），
+                    # 避免合法增量操作（修正输入值、分页滚动）被误判为重复
+                    current_fp = self._action_fingerprint(action)
                     if current_fp == last_fp:
                         repeat_skips += 1
                         logger.warning(
@@ -233,12 +243,13 @@ class Agent:
                 else:
                     repeat_skips = 0
                 if skip_action:
-                    await self._record_step(
-                        step, action,
-                        Observation.fail(
-                            error=f"重复动作被跳过（连续 {repeat_skips} 次对同一目标执行相同动作且页面无变化），请勿重复该动作",
-                        ),
+                    skip_obs = Observation.fail(
+                        error=f"重复动作被跳过（连续 {repeat_skips} 次对同一目标执行相同动作且页面无变化），请勿重复该动作",
                     )
+                    await self._record_step(step, action, skip_obs)
+                    # 待解决问题 #19：跳过同样反馈 Planner（失败 Observation），
+                    # 清除 _last_intent 残留，避免后续失败被错误依据回滚
+                    self._notify_planner_result(action, skip_obs)
                     continue
 
                 # 3.1 Execute（失败自动重试：机械 1 次 → Reflection 1 次）
@@ -284,12 +295,16 @@ class Agent:
                 # 3.5 页面已变化 → 结束本批（旧 target_id 可能失效），并清空重复基准
                 if observation.page_changed:
                     logger.info("📄 [Step {}] 页面已变化，结束本批，重新观察", step)
+                    # 待解决问题 #13：断批处统一复位停滞/重复检测四变量
                     last_fp = None
                     last_changed = True
+                    repeat_skips = 0
+                    consecutive_waits = 0
                     break
 
                 # 3.6 更新重复检测基准（仅记录"页面未变化"的最近一次成功动作）
-                last_fp = (final_action.action, final_action.target_id)
+                # 待解决问题 #12：基准同样纳入语义参数指纹
+                last_fp = self._action_fingerprint(final_action)
                 last_changed = observation.page_changed
 
                 logger.info("✅ [Step {}] 成功 | URL: {}", step, observation.url)
@@ -302,8 +317,18 @@ class Agent:
                         "🔄 页面已恢复，重新规划（恢复 {}/{}）",
                         self._recovery_count, self._max_recoveries,
                     )
+                    # 待解决问题 #13：恢复已实际改变页面，统一复位停滞/重复检测
+                    # 四变量，避免恢复后重做此前成功动作被误读为「重复动作停滞」
+                    last_fp = None
+                    last_changed = True
+                    repeat_skips = 0
+                    consecutive_waits = 0
                     continue
                 return failed_obs
+
+            # 批自然耗尽（无失败/无页面变化）：跨批不累计重复跳过计数（待解决问题 #12），
+            # 避免分页式滚动等合法跨批操作累计 3 次被误判停滞
+            repeat_skips = 0
 
         # 超出最大步数
         logger.warning("⚠️  超出最大步数限制 ({})", self._max_steps)
@@ -544,6 +569,35 @@ class Agent:
         except Exception as e:
             logger.warning("⚠️  动作执行异常（浏览器可能已关闭）: {}", e)
             return None
+
+    async def _safe_plan(self, coro, *, label: str):
+        """安全调用 Planner 协程（待解决问题 #15）。
+
+        异常视为「本轮无法规划」返回 None，走既有重试/中止路径，
+        避免 Planner 内部异常击穿 Agent 主循环（与 _safe_observe / _safe_execute 对齐）。
+        """
+        try:
+            return await coro
+        except Exception as e:
+            logger.error("Planner.{} 调用异常，视为无法规划: {}", label, e)
+            return None
+
+    @staticmethod
+    def _action_fingerprint(action: Action) -> tuple:
+        """重复动作指纹：动作 + 目标 + 语义参数（待解决问题 #12）。
+
+        仅纳入影响执行结果的语义参数：input/select 计入归一化 value，
+        scroll 计入 direction+amount —— 避免合法增量操作（修正输入值、
+        分页滚动）被误判为「重复动作」。
+        """
+        params = action.params or {}
+        if action.action == "scroll":
+            semantic = (params.get("direction", "down"), params.get("amount", 300))
+        elif action.action in ("input", "select"):
+            semantic = (action.value,)
+        else:
+            semantic = ()
+        return (action.action, action.target_id, semantic)
 
     def _notify_planner_result(
         self, action: Action, observation: Observation,

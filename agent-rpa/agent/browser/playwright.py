@@ -125,23 +125,44 @@ class BrowserTool:
             old_pages = self._current_pages()
             await locator.click(force=force, timeout=timeout)
             await self._smart_wait()
-            new_url = self._page.url
-            if new_url == old_url:
-                # URL 未变化 → 可能打开了新标签页，短轮询检测（快速失败，避免每次点击固定等待）
-                new_page = await self._detect_new_page(old_pages)
-            else:
-                # URL 已变化 → 同页导航发生，无需检测新标签页
-                new_page = None
-            if new_page is not None:
-                return await self._switch_to_page(new_page)
-            new_title = await self._page.title()
-            new_fp = await self._page_fingerprint()
-            elapsed = time.time() - start
-            changed = (
-                (new_url != old_url)
-                or (new_title != old_title)
-                or (old_fp != new_fp)
-            )
+            # 待解决问题 #39：点击成功后，后置采样（URL/标题/DOM 指纹/新标签页检测）
+            # 独立 try —— 采样异常（如点击触发跳转导致原元素 Frame detach）不改变
+            # 成功结论：不可逆操作不得因采样失败被误报为失败而重复执行。
+            # 采样失败时 page_changed 标记为未知并写入 data 供上层参考。
+            try:
+                new_url = self._page.url
+                if new_url == old_url:
+                    # URL 未变化 → 可能打开了新标签页，短轮询检测（快速失败，避免每次点击固定等待）
+                    new_page = await self._detect_new_page(old_pages)
+                else:
+                    # URL 已变化 → 同页导航发生，无需检测新标签页
+                    new_page = None
+                if new_page is not None:
+                    return await self._switch_to_page(new_page)
+                new_title = await self._page.title()
+                new_fp = await self._page_fingerprint()
+                elapsed = time.time() - start
+                changed = (
+                    (new_url != old_url)
+                    or (new_title != old_title)
+                    or (old_fp != new_fp)
+                )
+            except Exception as e:
+                logger.warning(
+                    "click 后置采样异常（点击已生效，按成功处理）: selector={} | {}",
+                    selector, e,
+                )
+                try:
+                    sample_url = self._page.url
+                except Exception:
+                    sample_url = None
+                return Observation.ok(
+                    url=sample_url,
+                    data={
+                        "page_changed_unknown": True,
+                        "post_sample_error": str(e),
+                    },
+                )
             if changed:
                 logger.info("✅ click 完成 | 页面变化 | {:.1f}s", elapsed)
             else:
@@ -311,12 +332,30 @@ class BrowserTool:
                 await locator.click()
 
             download = await download_info.value
+            # 待解决问题 #4：suggested_filename 来自页面响应头（Content-Disposition），
+            # 不可信 —— 仅取 basename 并拒绝空名/路径穿越，防止写出 download_dir 之外
+            suggested = download.suggested_filename or ""
+            safe_name = Path(suggested).name if suggested else ""
+            if not safe_name or safe_name in (".", ".."):
+                logger.warning(
+                    "⬇️ download 建议文件名不可信（空名或路径穿越），已拒绝: {!r}",
+                    suggested,
+                )
+                return Observation.fail(
+                    error=f"下载文件名不可信: {suggested!r}",
+                    url=self._page.url,
+                )
+            if safe_name != suggested:
+                logger.warning(
+                    "⬇️ download 文件名含路径段，已清洗为 basename: {!r} → {!r}",
+                    suggested, safe_name,
+                )
             if download_dir:
-                target_path = Path(download_dir) / download.suggested_filename
+                target_path = Path(download_dir) / safe_name
             elif save_path:
                 target_path = save_path
             else:
-                target_path = Path.cwd() / download.suggested_filename
+                target_path = Path.cwd() / safe_name
             await download.save_as(str(target_path))
             await self._smart_wait()
 

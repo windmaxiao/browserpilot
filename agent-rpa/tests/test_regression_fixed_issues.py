@@ -214,12 +214,10 @@ class TestIssue7And9_ObservationDataNoNesting:
         assert obs.data["message"] == "完成"
         assert obs.data["done"] == True
 
-    def test_data_with_extra_kwargs_merged(self):
-        """data 与 **kwargs 正确合并"""
-        obs = Observation.ok(data={"path": "/tmp"}, extra="x", count=3)
-        assert obs.data["path"] == "/tmp"
-        assert obs.data["extra"] == "x"
-        assert obs.data["count"] == 3
+    def test_data_with_extra_kwargs_rejected(self):
+        """data 外的未知 kwargs 直接抛 TypeError（待解决问题 #42）"""
+        with pytest.raises(TypeError):
+            Observation.ok(data={"path": "/tmp"}, extra="x", count=3)
 
     def test_no_data_returns_empty_dict(self):
         """不传 data 参数时 data 为空 dict"""
@@ -231,9 +229,9 @@ class TestIssue7And9_ObservationDataNoNesting:
         obs = Observation.ok(url="https://example.com", data=None)
         assert obs.data == {}
 
-    def test_fail_data_not_affected(self):
-        """fail() 的 data 行为不受影响"""
-        obs = Observation.fail(error="错误", detail="原因")
+    def test_fail_data_explicit_param(self):
+        """fail() 的 data 经显式参数传入（待解决问题 #42）"""
+        obs = Observation.fail(error="错误", data={"detail": "原因"})
         assert obs.data["detail"] == "原因"
 
     @pytest.mark.asyncio

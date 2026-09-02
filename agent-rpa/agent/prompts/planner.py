@@ -17,6 +17,8 @@ import json
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
+from loguru import logger
+
 from agent.schema.action import (
     Action,
     NEEDS_TARGET,
@@ -508,13 +510,27 @@ def parse_action_list(
         actions = data.get("actions")
         if not isinstance(actions, list) or not actions:
             raise ActionParseError("批量输出缺少非空 actions 数组")
+        # 待解决问题 #43：模型可能无视 schema 的 maxItems 复读超长数组。
+        # 超限直接抛不可重试内容错误走修复回路，避免突破「每 Snapshot 最多
+        # N 个动作」的批设计上限（放大误操作面与单轮耗时）。
+        if len(actions) > _BATCH_MAX_ACTIONS:
+            raise ActionParseError(
+                f"批量动作数量超限: {len(actions)} > {_BATCH_MAX_ACTIONS}"
+                f"（超出单 Snapshot 批设计上限）"
+            )
         parsed: list[Action] = []
         for item in actions:
             try:
                 parsed.append(parse_action_dict(
                     item, snapshot, allowed_upload_dirs=allowed_upload_dirs,
                 ))
-            except ActionParseError:
+            except ActionParseError as e:
+                # 待解决问题 #30：单条非法（含 upload 越权）被跳过时记录告警，
+                # 避免静默丢弃让 LLM 收不到反馈；批量语义保持不中断。
+                logger.warning(
+                    "批量动作中单条解析失败，已跳过: {} | 原因: {}",
+                    item, e,
+                )
                 continue
         if not parsed:
             raise ActionParseError("批量输出中没有任何合法动作")

@@ -402,6 +402,32 @@ class TestPlanBatch:
         with pytest.raises(ActionParseError):
             parse_action_list({"action": "click", "target_id": "e99"}, _snapshot())
 
+    def test_parse_action_list_over_max_raises(self):
+        """待解决问题 #43：批量数量超过设计上限（10）直接抛 ActionParseError 走修复回路"""
+        with pytest.raises(ActionParseError, match="数量超限"):
+            parse_action_list(
+                {"actions": [
+                    {"action": "click", "target_id": "e1"} for _ in range(11)
+                ]},
+                _snapshot(),
+            )
+
+    def test_parse_action_list_batch_upload_out_of_scope_skipped_with_warning(self):
+        """待解决问题 #30：批量中 upload 越权被跳过但保留合法条目（批量语义不中断）。
+
+        未配置 allowed_upload_dirs 时 upload 一律拒绝；同批其他合法动作仍保留。
+        """
+        actions = parse_action_list(
+            {"actions": [
+                {"action": "upload", "target_id": "e1", "value": "C:/tmp/a.txt"},
+                {"action": "click", "target_id": "e1"},
+            ]},
+            _snapshot(),
+        )
+        assert len(actions) == 1
+        assert actions[0].action == "click"
+        assert actions[0].params["selector"] == "#btn-login"
+
     async def test_plan_batch_returns_multiple_actions(self):
         client = MockLLMClient([{"actions": [
             {"action": "input", "target_id": "e0", "value": "admin"},

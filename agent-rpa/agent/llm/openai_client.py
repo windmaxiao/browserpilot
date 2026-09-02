@@ -20,6 +20,8 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
+from loguru import logger
+
 from agent.llm.base import (
     LLMError,
     LLMInvalidResponseError,
@@ -234,7 +236,25 @@ class OpenAILLMClient:
         # M1：choices 提取同样可能抛异常（部分兼容端点返回空 choices 或结构异常），
         # 统一映射为不可重试的 LLMInvalidResponseError，避免击穿 Agent 主循环。
         try:
-            content = (resp.choices[0].message.content or "").strip()
+            choice = resp.choices[0]
+        except (IndexError, AttributeError, TypeError) as e:
+            raise LLMInvalidResponseError(
+                f"模型返回结构异常（无可用 choices/content）: {type(e).__name__}"
+            ) from e
+        # 待解决问题 #16：finish_reason=length 表示输出因 max_tokens 被截断，
+        # 不应把残缺 JSON 当作正常输出进入解析/内容层修复（修复也会再次截断）。
+        # 记录明确告警并映射为不可重试错误，消息注明「截断」与普通格式错误区分。
+        if getattr(choice, "finish_reason", None) == "length":
+            logger.warning(
+                "模型响应因 max_tokens 被截断（finish_reason=length），"
+                "请增大 max_tokens 或简化输出；本次按不可重试错误处理"
+            )
+            raise LLMInvalidResponseError(
+                "模型响应被截断（finish_reason=length）：输出超过 max_tokens 上限，"
+                "请增大 max_tokens 或简化输出"
+            )
+        try:
+            content = (choice.message.content or "").strip()
         except (IndexError, AttributeError, TypeError) as e:
             raise LLMInvalidResponseError(
                 f"模型返回结构异常（无可用 choices/content）: {type(e).__name__}"

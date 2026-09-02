@@ -237,6 +237,37 @@ class TestOpenAILLMClientProvider:
                 system_prompt="s", user_prompt="u", schema={}, timeout=1000,
             ))
 
+    def test_finish_reason_length_maps_to_invalid_response(self, monkeypatch, fake_openai):
+        """待解决问题 #16：finish_reason=length 视为截断，映射为不可重试 LLMInvalidResponseError。
+
+        即便 content 恰好是合法 JSON，截断也应被拒绝（残缺数据不能静默进入解析层）。
+        """
+        class _FakeMsg:
+            content = '{"action": "done"}'
+
+        class _FakeChoice:
+            finish_reason = "length"
+            message = _FakeMsg()
+
+        class _FakeResp:
+            choices = [_FakeChoice()]
+
+        class _FakeCompletions:
+            async def create(self, **kwargs):
+                return _FakeResp()
+
+        class _FakeChat:
+            completions = _FakeCompletions()
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-dummy")
+        client = OpenAILLMClient()
+        client._client.chat = _FakeChat()
+
+        with pytest.raises(LLMInvalidResponseError, match="截断"):
+            asyncio.run(client.complete_json(
+                system_prompt="s", user_prompt="u", schema={}, timeout=1000,
+            ))
+
     def test_provider_presets_are_complete(self):
         from agent.llm import PROVIDER_PRESETS
 

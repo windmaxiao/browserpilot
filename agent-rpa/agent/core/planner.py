@@ -60,9 +60,16 @@ class TaskSpec:
 _URL_RE = re.compile(r"(?:https?|file)://[^\s，。]+")
 _SEARCH_RE = re.compile(r"(?:搜索|查找|查询|搜一下|搜)[：:\s]+([^\s，。]+)")
 # 点击/等待 目标在遇到下一个动词、句号或结尾处截断；
-# 动词后要求有空格/冒号，避免误匹配"点击率"等复合词
-_VERB_BOUNDARY = r"(?=\s*(?:打开|查找|搜索|查询|搜一下|点击|等待|然后|接着|再)|，|。|$)"
+# 动词后要求有空格/冒号，避免误匹配"点击率"等复合词。
+# 待解决问题 #49：分隔字符集含半角 , ; .（中英混输常见），
+# 目标取到半角标点即截断，避免「点击 登录, 然后搜索」被整体当作目标。
+_VERB_BOUNDARY = r"(?=\s*(?:打开|查找|搜索|查询|搜一下|点击|等待|然后|接着|再)|[，。,;.]|$)"
 _CLICK_RE = re.compile(r"点击[：:\s]+([^，。\n]+?)" + _VERB_BOUNDARY)
+# 待解决问题 #14：引号兜底仅限定在「点击」窗口内 —— 全局提取引号会把强调性引号
+# （如『查找"二里头遗址"的介绍』）凭空变成强制点击义务、使完成判定不可达。
+# 此处补「点击"X"」引号与动词直接相连（无空格）的写法：_CLICK_RE 的 [：:\s]+
+# 要求动词后至少一个空格/冒号，不匹配 `点击"登录"`，故单独匹配引号目标。
+_CLICK_QUOTED_RE = re.compile(r'点击["“「『]([^"”」』]+)["”」』]')
 _WAIT_RE = re.compile(r"等待[：:\s]+([^，。\n]+?)" + _VERB_BOUNDARY)
 _LOADING_PHRASES = ("页面加载完成", "页面加载", "加载完成", "页面加载完毕")
 
@@ -79,14 +86,20 @@ def _dedupe(items: list[str]) -> list[str]:
 
 
 def _extract_click_targets(goal: str) -> list[str]:
-    """提取「点击 X」的目标文本；若 X 内含引号则优先取引号内容。"""
+    """提取「点击 X」的目标文本；若 X 内含引号则优先取引号内容。
+
+    待解决问题 #49：目标首尾的半角标点一并剥除（与 _VERB_BOUNDARY 互补）。
+    待解决问题 #14：引号目标仅限「点击」窗口内 —— 除 _CLICK_RE 匹配的
+    「点击 X」外，补 `点击"X"` 引号直接相连的写法（_CLICK_QUOTED_RE）。
+    """
     targets: list[str] = []
     for m in _CLICK_RE.finditer(goal):
         raw = m.group(1).strip()
         if not raw:
             continue
         quoted = re.search(r'["“「『]([^"”」』]+)["”」』]', raw)
-        targets.append(quoted.group(1) if quoted else raw.strip('"“”「『』」'))
+        targets.append(quoted.group(1) if quoted else raw.strip('"“”「『』」,;.，。'))
+    targets.extend(m.group(1).strip() for m in _CLICK_QUOTED_RE.finditer(goal))
     return targets
 
 
@@ -97,8 +110,11 @@ def parse_goal(goal: str) -> TaskSpec:
     if m:
         spec.url = m.group(0).rstrip(".,;，。")
     spec.search_keywords = _SEARCH_RE.findall(goal)
-    quoted = re.findall(r'["“「『]([^"”」』]+)["”」』]', goal)
-    spec.target_texts = _dedupe(quoted + _extract_click_targets(goal))
+    # 待解决问题 #14：不再把全局引号内容一律并入点击目标 —— 引号常作强调
+    # 用途（如『查找“二里头遗址”的介绍』），全局兜底会凭空制造强制点击义务、
+    # 使完成判定不可达。引号兜底仅限定在「点击 X」动词窗口内部
+    # （_extract_click_targets 已含该逻辑）。
+    spec.target_texts = _dedupe(_extract_click_targets(goal))
     spec.done_keywords = [k for k in spec.search_keywords + spec.target_texts if k]
     for m in _WAIT_RE.finditer(goal):
         cond = m.group(1).strip()
@@ -324,7 +340,10 @@ class RuleBasedPlanner(Planner):
         self._last_intent = None
         if observation is None or not observation.is_error:
             return
-        if action.action == "input":
+        # 待解决问题 #20：input 失败回滚仅对「搜索输入」意图生效 ——
+        # 自定义规则 / Reflection 产生的 input 无对应意图，失败时不误清 _searched，
+        # 避免重复输入（与 click 分支的 intent 校验对齐）。
+        if action.action == "input" and intent == ("input",):
             self._searched = False
         elif action.action == "click" and intent is not None:
             if intent[0] == "submit":
@@ -531,7 +550,9 @@ class LLMPlanner(Planner):
         self._max_repair_attempts = max_repair_attempts
         self._timeout = timeout
         self._constraints = list(constraints) if constraints else None
-        self._llm_retries = llm_retries
+        # 待解决问题 #9：llm_retries=0 会让 _call_llm_with_retry 一次都不执行、
+        # 规划静默全部失败 —— 强制至少 1 次重试机会
+        self._llm_retries = max(1, llm_retries)
         self._llm_retry_delay = llm_retry_delay
         self._llm_retry_max_delay = llm_retry_max_delay
         # M5：upload 文件路径白名单（未配置则模型输出 upload 动作被拒绝）

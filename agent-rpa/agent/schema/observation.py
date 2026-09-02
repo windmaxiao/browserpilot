@@ -65,15 +65,18 @@ class Observation:
         title: Optional[str] = None,
         page_changed: bool = False,
         data: Optional[dict] = None,
-        **kwargs,
     ) -> Observation:
-        merged = {**(data or {}), **kwargs}
+        """成功 Observation（待解决问题 #42：无 **kwargs 静默并入 data）。
+
+        附加信息一律经显式 ``data`` 传入；拼错字段名会直接抛 TypeError，
+        避免错误数据静默变形为 data 杂项。
+        """
         return cls(
             success=True,
             url=url,
             title=title,
             page_changed=page_changed,
-            data=merged,
+            data=dict(data or {}),
         )
 
     @classmethod
@@ -81,13 +84,16 @@ class Observation:
         cls,
         error: str,
         url: Optional[str] = None,
+        title: Optional[str] = None,
+        page_changed: bool = False,
         data: Optional[dict] = None,
-        **kwargs,
     ) -> Observation:
-        merged = {**(data or {}), **kwargs}
+        """失败 Observation（待解决问题 #42：补齐 url/title 形参，与 ok() 对齐）。"""
         return cls(
             success=False,
             url=url,
+            title=title,
+            page_changed=page_changed,
             error=error,
-            data=merged,
+            data=dict(data or {}),
         )
