@@ -1,0 +1,41 @@
+# 内置厂商默认预设（随 agent-rpa 发布，保留入库）。
+# 框架启动时从此文件读取默认厂商；Provider 预设 = 本默认 + 用户私有 llm_presets.yaml（覆盖/新增）。
+#
+# 如需自定义厂商，复制本文件为 llm_presets.yaml 后修改即可，无需改代码；
+# 私有文件依次在 包目录 → 当前运行目录 → ~/.browserpilot/ 查找，后找到者覆盖同名项。
+#
+# 字段：base_url（OpenAI 兼容端点，必填）/ model（默认模型，可选）
+#       env_key（API Key 环境变量名，可选，缺省 OPENAI_API_KEY）
+providers:
+  deepseek:
+    base_url: https://api.deepseek.com
+    model: deepseek-v4-flash
+    env_key: DEEPSEEK_API_KEY
+  moonshot:
+    base_url: https://api.moonshot.cn/v1
+    model: kimi-k3
+    env_key: MOONSHOT_API_KEY
+  zhipu:
+    base_url: https://open.bigmodel.cn/api/paas/v4
+    model: glm-4.7-flash
+    env_key: ZHIPU_API_KEY
+  qwen:
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    model: qwen3.8-max
+    env_key: DASHSCOPE_API_KEY
+  doubao:
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    model: doubao-seed-2-1-pro-260628
+    env_key: ARK_API_KEY
+  ernie:
+    base_url: https://qianfan.baidubce.com/v2
+    model: ernie-5.0
+    env_key: QIANFAN_API_KEY
+  spark:
+    base_url: https://spark-api-open.xf-yun.com/v1
+    model: 4.0Ultra
+    env_key: SPARK_API_KEY
+  minimax:
+    base_url: https://api.minimax.cn/v1
+    model: MiniMax-M3
+    env_key: MINIMAX_API_KEY

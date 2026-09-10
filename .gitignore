@@ -150,6 +150,11 @@ activemq-data/
 # Environments
 .env
 .envrc
+
+# 用户私有 LLM 厂商预设（示例 llm_presets.yaml.example 保留入库）
+llm_presets.yaml
+llm_presets.yml
+llm_presets.json
 .venv
 env/
 venv/

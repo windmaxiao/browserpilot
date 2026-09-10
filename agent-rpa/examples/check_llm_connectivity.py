@@ -1,7 +1,7 @@
 """
 国内大模型预设连通性测试（真实网络 + 真实 API Key）
 
-逐个验证 PROVIDER_PRESETS 中 7 家厂商（DeepSeek / Kimi / 智谱 / 通义 / 豆包 / 千帆 / 星火）
+逐个验证内置及外部配置的厂商预设（DeepSeek / Kimi / 智谱 / 通义 / 豆包 / 千帆 / 星火 / MiniMax 等）
 的最新模型能否通过 OpenAI 兼容端点正常连接，并返回结构化 JSON。
 
 用法（在 agent-rpa 目录下运行，PowerShell）：
@@ -26,7 +26,7 @@ import sys
 from agent.llm import (
     LLMError,
     OpenAILLMClient,
-    PROVIDER_PRESETS,
+    all_provider_presets,
     load_env_files,
     resolve_api_key_env,
 )
@@ -63,7 +63,7 @@ async def check_provider(name: str) -> tuple[str, str, str]:
 async def main() -> int:
     # 先加载本地 .env（当前目录或 ~/.browserpilot/.env），再检查各家 Key
     load_env_files()
-    names = sys.argv[1:] or list(PROVIDER_PRESETS)
+    names = sys.argv[1:] or list(all_provider_presets())
     print(f"共 {len(names)} 家厂商待检查：{', '.join(names)}")
     print("-" * 78)
     results = []

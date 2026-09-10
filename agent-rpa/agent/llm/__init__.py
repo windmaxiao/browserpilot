@@ -19,7 +19,9 @@ from agent.llm.mock import MockLLMCall, MockLLMClient
 from agent.llm.openai_client import (
     PROVIDER_PRESETS,
     OpenAILLMClient,
+    all_provider_presets,
     load_env_files,
+    load_preset_files,
     resolve_api_key_env,
     resolve_provider_preset,
 )
@@ -36,7 +38,9 @@ __all__ = [
     "MockLLMCall",
     "OpenAILLMClient",
     "PROVIDER_PRESETS",
+    "all_provider_presets",
     "load_env_files",
+    "load_preset_files",
     "resolve_provider_preset",
     "resolve_api_key_env",
 ]

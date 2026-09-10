@@ -118,7 +118,7 @@ agent-rpa/
 │   ├── baidu_demo.py       # 规则 Agent 模式 Demo —— 真实百度
 │   ├── llm_agent_demo.py   # LLM Agent 自由模式 Demo —— 本地搜索页（LLMPlanner）
 │   ├── llm_baidu_demo.py   # LLM Agent 两阶段 Demo —— 真实百度（TaskPlanner）
-│   ├── check_llm_connectivity.py  # 7 家国内大模型连通性测试
+│   ├── check_llm_connectivity.py  # 国内大模型预设连通性测试
 │   ├── search_page.html    # 本地确定性搜索页（agent_demo 使用）
 │   └── ex_robot/ydgx/      # 业务示例（LLM 局部辅助：登录/跳转/菜单导航 + 多层 iframe + 失败回退，不入 git）
 │
@@ -189,8 +189,11 @@ Agent Loop
 | `doubao` | 火山方舟 豆包（推理接入点 ID） | `https://ark.cn-beijing.volces.com/api/v3` | `ARK_API_KEY` |
 | `ernie` | 百度千帆 文心（ernie-5.0） | `https://qianfan.baidubce.com/v2` | `QIANFAN_API_KEY` |
 | `spark` | 讯飞星火（4.0Ultra） | `https://spark-api-open.xf-yun.com/v1` | `SPARK_API_KEY` |
+| `minimax` | MiniMax 海螺（MiniMax-M3） | `https://api.minimax.cn/v1` | `MINIMAX_API_KEY` |
 
 参数优先级（高 → 低）：**显式参数 > provider 预设 > 通用环境变量（`OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL`）> 内置默认**。厂商专属 Key 缺失时回退 `OPENAI_API_KEY`。
+
+**厂商预设由配置文件管理**（代码不内嵌厂商清单）：内置 8 家定义在随库发布的 [llm_presets.default.yaml](llm_presets.default.yaml)；如需新增/覆盖（私有化部署、自建中转、本地 LM Studio 等），复制为 `llm_presets.yaml` 编辑即可（依次查 包目录 → 当前运行目录 → `~/.browserpilot/`，后加载者覆盖同名项，按字段合并）。之后用 `LLM_PROVIDER=<名称>` 或 `provider="<名称>"` 调用，连通性测试脚本自动识别新增厂商。
 
 **本地 .env 配置**（可选）：不想每次设置环境变量时，可写 `.env` 文件（当前目录 `.env` 或 `~/.browserpilot/.env`，先项目级后用户级）。`KEY=VALUE` 格式，`#` 为注释，值两侧引号自动去除；已存在的环境变量优先，不会被文件覆盖；两个文件均不存在时行为与不配置完全一致（零依赖实现）。
 

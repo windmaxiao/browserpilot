@@ -276,6 +276,55 @@ class TestOpenAILLMClientProvider:
             assert preset["base_url"].startswith("https://"), name
 
 
+class TestExternalPresets:
+    """外部 llm_presets.yaml 覆盖/新增厂商预设（不改代码增删私有模型）。"""
+
+    @pytest.fixture
+    def isolated(self, monkeypatch, tmp_path):
+        """cwd 与家目录隔离到临时目录，屏蔽真实环境与包目录预设文件。"""
+        from pathlib import Path
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr(openai_client, "_PROJECT_ENV", tmp_path / "unused.env")
+        return tmp_path
+
+    def test_external_presets_field_merge_and_add(self, isolated):
+        from agent.llm import all_provider_presets, resolve_api_key_env, resolve_provider_preset
+
+        (isolated / "llm_presets.yaml").write_text(
+            "providers:\n"
+            "  deepseek:\n"
+            "    base_url: https://proxy.example/v1\n"      # 只改 base_url，其余字段继承内置
+            "  lmstudio:\n"
+            "    base_url: http://localhost:1234/v1\n"
+            "    model: qwen3.5-9b\n",
+            encoding="utf-8",
+        )
+        merged = all_provider_presets()
+        # 外部只覆盖字段：base_url 变，model/env_key 仍来自内置
+        assert merged["deepseek"] == {
+            "base_url": "https://proxy.example/v1",
+            "model": "deepseek-v4-flash",
+            "env_key": "DEEPSEEK_API_KEY",
+        }
+        # 外部新增 provider 可被解析
+        assert merged["lmstudio"] == {
+            "base_url": "http://localhost:1234/v1",
+            "model": "qwen3.5-9b",
+        }
+        assert resolve_provider_preset("lmstudio")["model"] == "qwen3.5-9b"
+        # 无 env_key 时回退 OPENAI_API_KEY（不抛 KeyError）
+        assert resolve_api_key_env("lmstudio") == "OPENAI_API_KEY"
+        # 未覆盖的内置项不受影响
+        assert merged["minimax"]["base_url"] == "https://api.minimax.cn/v1"
+
+    def test_no_external_file_keeps_builtin(self, isolated):
+        from agent.llm import PROVIDER_PRESETS, all_provider_presets
+
+        assert all_provider_presets() == PROVIDER_PRESETS
+
+
 class TestEnvFileLoading:
     """本地 .env 配置加载（零依赖，仅填充未设置的环境变量）。"""
 
