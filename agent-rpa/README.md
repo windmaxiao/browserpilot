@@ -205,7 +205,7 @@ from agent.llm import OpenAILLMClient
 client = OpenAILLMClient(provider="orcarouter")  # 读 ORCA_KEY
 ```
 
-若在 Claude Code 等工具中使用，可直接用官方 OpenAI 兼容配置（`wire_api="responses"` 及推介码见下方代码片段）：
+在 Claude Code 等工具中可用官方 OpenAI 兼容配置：
 
 ```toml
 model = "orcarouter/auto"
@@ -217,8 +217,6 @@ base_url = "https://api.orcarouter.ai/v1"
 wire_api = "responses"
 env_key  = "ORCA_KEY"
 ```
-
-注册/推荐链接：<https://www.orcarouter.ai/ref/ref_7080e229adfc3b9f2ead>（新用户经此链接注册自动归因）。
 
 **本地 .env 配置**（可选）：不想每次设置环境变量时，可写 `.env` 文件（当前目录 `.env` 或 `~/.browserpilot/.env`，先项目级后用户级）。`KEY=VALUE` 格式，`#` 为注释，值两侧引号自动去除；已存在的环境变量优先，不会被文件覆盖；两个文件均不存在时行为与不配置完全一致（零依赖实现）。
 

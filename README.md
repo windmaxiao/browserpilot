@@ -79,6 +79,34 @@ pytest
 
 > 详细文档见 [agent-rpa/README.md](agent-rpa/README.md)，**使用指南见 [使用文档.md](使用文档.md)**，**已知问题见 [待解决问题.md](待解决问题.md)**
 
+## LLM 接入
+
+内置多家大模型厂商预设（定义于 `agent-rpa/llm_presets.default.yaml`，支持外部 `llm_presets.yaml` 覆盖/新增），用 `.env` 的 `LLM_PROVIDER` 或 `provider=` 选路即可。详情见 [agent-rpa/README.md](agent-rpa/README.md)。
+
+### OrcaRouter 接入（多模型路由）
+
+OrcaRouter 提供多模型路由中转，OpenAI 兼容端点 `https://api.orcarouter.ai/v1`，配套预设 `provider="orcarouter"`、模型 `orcarouter/auto`、Key 变量 `ORCA_KEY`：
+
+```python
+from agent.llm import OpenAILLMClient
+client = OpenAILLMClient(provider="orcarouter")  # 读 ORCA_KEY
+```
+
+在 Claude Code 等工具中可用官方 OpenAI 兼容配置：
+
+```toml
+model = "orcarouter/auto"
+model_provider = "orcarouter"
+
+[model_providers.orcarouter]
+name     = "OrcaRouter"
+base_url = "https://api.orcarouter.ai/v1"
+wire_api = "responses"
+env_key  = "ORCA_KEY"
+```
+
+**推荐注册链接**：<https://www.orcarouter.ai/ref/ref_7080e229adfc3b9f2ead>（新用户经此链接注册自动归因）。
+
 ## 开发路线
 
 | 版本 | 目标 | 状态 |
