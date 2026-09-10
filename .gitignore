@@ -155,6 +155,10 @@ activemq-data/
 llm_presets.yaml
 llm_presets.yml
 llm_presets.json
+
+# 本地私人脚本与临时文档
+/agent-rpa/examples/check_lmstudio_connectivity.py
+/glm审查文档.md
 .venv
 env/
 venv/

@@ -55,14 +55,14 @@ manager = BrowserManager(channel="chrome")
 manager = BrowserManager(executable_path="C:/Program Files/Google/Chrome/Application/chrome.exe")
 ```
 
-| 参数 | 默认值 | 说明 |
-| :--- | :--- | :--- |
-| `headless` | `False` | 是否无头模式。`False` 时自动启用最大化窗口 + `no_viewport` |
-| `slow_mo` | `50` | 操作间延迟（毫秒），模拟人类操作速度；`0` 可关闭 |
-| `channel` | — | 使用系统安装的浏览器：`"chrome"`、`"msedge"`、`"chrome-beta"` 等 |
-| `executable_path` | — | 指定浏览器可执行文件路径（优先级高于 `channel`） |
-| `proxy` | — | 代理配置，如 `{"server": "http://proxy:8080"}` |
-| `**kwargs` | — | 其余参数透传给 `playwright.chromium.launch()` |
+| 参数                | 默认值     | 说明                                                 |
+| :---------------- | :------ | :------------------------------------------------- |
+| `headless`        | `False` | 是否无头模式。`False` 时自动启用最大化窗口 + `no_viewport`          |
+| `slow_mo`         | `50`    | 操作间延迟（毫秒），模拟人类操作速度；`0` 可关闭                         |
+| `channel`         | —       | 使用系统安装的浏览器：`"chrome"`、`"msedge"`、`"chrome-beta"` 等 |
+| `executable_path` | —       | 指定浏览器可执行文件路径（优先级高于 `channel`）                      |
+| `proxy`           | —       | 代理配置，如 `{"server": "http://proxy:8080"}`           |
+| `**kwargs`        | —       | 其余参数透传给 `playwright.chromium.launch()`             |
 
 三种浏览器选择策略（优先级从高到低）：
 
@@ -74,13 +74,13 @@ manager = BrowserManager(executable_path="C:/Program Files/Google/Chrome/Applica
 
 `BrowserManager.start()` 自动应用以下 Chromium 启动参数：
 
-| 参数 | 作用 |
-| :--- | :--- |
+| 参数                                              | 作用                              |
+| :---------------------------------------------- | :------------------------------ |
 | `--disable-blink-features=AutomationControlled` | 隐藏 `navigator.webdriver` 等自动化标记 |
-| `--disable-dev-shm-usage` | 避免 Linux `/dev/shm` 不足导致崩溃 |
-| `--no-sandbox` | 沙箱兼容性 |
-| `--disable-gpu` | 减少 GPU 指纹特征 |
-| `--start-maximized` | 非 headless 时窗口最大化 |
+| `--disable-dev-shm-usage`                       | 避免 Linux `/dev/shm` 不足导致崩溃      |
+| `--no-sandbox`                                  | 沙箱兼容性                           |
+| `--disable-gpu`                                 | 减少 GPU 指纹特征                     |
+| `--start-maximized`                             | 非 headless 时窗口最大化               |
 
 非 headless 模式下自动设置 `no_viewport=True`，使用真实屏幕尺寸而非固定视口。
 
@@ -147,7 +147,7 @@ V0.2 在不接入 LLM 的前提下，打通「Snapshot → RuleBasedPlanner → 
 
 - **RuleBasedPlanner** — `parse_goal()` 解析自然语言目标（URL / 搜索词 / 点击目标 / 等待条件），配合 **8 条内置规则** 决策；`add_rule()` 支持注册自定义规则并优先执行。
 - **定位协议** — Snapshot 元素带全局唯一 `element_id`；Action 通过 `target_id` 引用元素，或直接用 `params["selector"]` 精确定位（优先级：`params.selector` > `target_id` > `target` 语义回退）。
-- **Action 参数校验** — `validate()` 覆盖每类动作的必填字段与参数类型（timeout 正整数、bool 参数、scroll direction/amount、wait ms、save_path 类型等），非法 Action 在到达浏览器前被拦截。
+- **Action 参数校验** — `validate()` 覆盖每类动作的必填字段与参数类型（timeout 正整数、bool 参数、scroll direction/amount、wait ms、save\_path 类型等），非法 Action 在到达浏览器前被拦截。
 - **执行契约加固** — BrowserTool 所有方法统一返回 `Observation`；`wait()`/`scroll()` 非法参数防护、杜绝 JS 注入；Snapshot selector 经 CSS 转义、`element_id` 每次生成重置。
 
 ### 选择器优先级（`_build_selector`）
@@ -180,20 +180,45 @@ Agent Loop
 
 国内主流大模型均提供 OpenAI 兼容端点，通过 `LLM_PROVIDER` 预设一键接入（也可用 `OPENAI_BASE_URL` 指向任意兼容地址）：
 
-| provider | 厂商/模型 | base_url | API Key 环境变量 |
-| :--- | :--- | :--- | :--- |
-| `deepseek` | DeepSeek（deepseek-v4-flash） | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` |
-| `moonshot` | Moonshot Kimi（kimi-k3） | `https://api.moonshot.cn/v1` | `MOONSHOT_API_KEY` |
-| `zhipu` | 智谱 GLM（glm-4.7-flash） | `https://open.bigmodel.cn/api/paas/v4` | `ZHIPU_API_KEY` |
-| `qwen` | 阿里云百炼 通义千问（qwen3.8-max） | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `DASHSCOPE_API_KEY` |
-| `doubao` | 火山方舟 豆包（推理接入点 ID） | `https://ark.cn-beijing.volces.com/api/v3` | `ARK_API_KEY` |
-| `ernie` | 百度千帆 文心（ernie-5.0） | `https://qianfan.baidubce.com/v2` | `QIANFAN_API_KEY` |
-| `spark` | 讯飞星火（4.0Ultra） | `https://spark-api-open.xf-yun.com/v1` | `SPARK_API_KEY` |
-| `minimax` | MiniMax 海螺（MiniMax-M3） | `https://api.minimax.cn/v1` | `MINIMAX_API_KEY` |
+| provider     | 厂商/模型                       | base\_url                                           | API Key 环境变量        |
+| :----------- | :-------------------------- | :-------------------------------------------------- | :------------------ |
+| `deepseek`   | DeepSeek（deepseek-v4-flash） | `https://api.deepseek.com`                          | `DEEPSEEK_API_KEY`  |
+| `moonshot`   | Moonshot Kimi（kimi-k3）      | `https://api.moonshot.cn/v1`                        | `MOONSHOT_API_KEY`  |
+| `zhipu`      | 智谱 GLM（glm-4.7-flash）       | `https://open.bigmodel.cn/api/paas/v4`              | `ZHIPU_API_KEY`     |
+| `qwen`       | 阿里云百炼 通义千问（qwen3.8-max）     | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `DASHSCOPE_API_KEY` |
+| `doubao`     | 火山方舟 豆包（推理接入点 ID）           | `https://ark.cn-beijing.volces.com/api/v3`          | `ARK_API_KEY`       |
+| `ernie`      | 百度千帆 文心（ernie-5.0）          | `https://qianfan.baidubce.com/v2`                   | `QIANFAN_API_KEY`   |
+| `spark`      | 讯飞星火（4.0Ultra）              | `https://spark-api-open.xf-yun.com/v1`              | `SPARK_API_KEY`     |
+| `minimax`    | MiniMax 海螺（MiniMax-M3）      | `https://api.minimax.cn/v1`                         | `MINIMAX_API_KEY`   |
+| `orcarouter` | OrcaRouter 通用路由器            | `https://api.orcarouter.ai/v1`                      | `ORCA_KEY`          |
 
-参数优先级（高 → 低）：**显式参数 > provider 预设 > 通用环境变量（`OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL`）> 内置默认**。厂商专属 Key 缺失时回退 `OPENAI_API_KEY`。
+参数优先级（高 → 低）：**显式参数 > provider 预设 > 通用环境变量（`OPENAI_API_KEY`** **/** **`OPENAI_BASE_URL`** **/** **`OPENAI_MODEL`）> 内置默认**。厂商专属 Key 缺失时回退 `OPENAI_API_KEY`。
 
-**厂商预设由配置文件管理**（代码不内嵌厂商清单）：内置 8 家定义在随库发布的 [llm_presets.default.yaml](llm_presets.default.yaml)；如需新增/覆盖（私有化部署、自建中转、本地 LM Studio 等），复制为 `llm_presets.yaml` 编辑即可（依次查 包目录 → 当前运行目录 → `~/.browserpilot/`，后加载者覆盖同名项，按字段合并）。之后用 `LLM_PROVIDER=<名称>` 或 `provider="<名称>"` 调用，连通性测试脚本自动识别新增厂商。
+**厂商预设由配置文件管理**（代码不内嵌厂商清单）：内置厂商定义在随库发布的 [llm\_presets.default.yaml](llm_presets.default.yaml)；如需新增/覆盖（私有化部署、自建中转、本地 LM Studio 等），复制为 `llm_presets.yaml` 编辑即可（依次查 包目录 → 当前运行目录 → `~/.browserpilot/`，后加载者覆盖同名项，按字段合并）。之后用 `LLM_PROVIDER=<名称>` 或 `provider="<名称>"` 调用，连通性测试脚本自动识别新增厂商。
+
+#### OrcaRouter 接入
+
+OrcaRouter 提供多模型路由中转，OpenAI 兼容端点 `https://api.orcarouter.ai/v1`，本项目预设 `provider="orcarouter"`、模型 `orcarouter/auto`、Key 环境变量 `ORCA_KEY`：
+
+```python
+from agent.llm import OpenAILLMClient
+client = OpenAILLMClient(provider="orcarouter")  # 读 ORCA_KEY
+```
+
+若在 Claude Code 等工具中使用，可直接用官方 OpenAI 兼容配置（`wire_api="responses"` 及推介码见下方代码片段）：
+
+```toml
+model = "orcarouter/auto"
+model_provider = "orcarouter"
+
+[model_providers.orcarouter]
+name     = "OrcaRouter"
+base_url = "https://api.orcarouter.ai/v1"
+wire_api = "responses"
+env_key  = "ORCA_KEY"
+```
+
+注册/推荐链接：<https://www.orcarouter.ai/ref/ref_7080e229adfc3b9f2ead>（新用户经此链接注册自动归因）。
 
 **本地 .env 配置**（可选）：不想每次设置环境变量时，可写 `.env` 文件（当前目录 `.env` 或 `~/.browserpilot/.env`，先项目级后用户级）。`KEY=VALUE` 格式，`#` 为注释，值两侧引号自动去除；已存在的环境变量优先，不会被文件覆盖；两个文件均不存在时行为与不配置完全一致（零依赖实现）。
 
@@ -267,8 +292,8 @@ Agent 每步 → _record_step() → HistoryMemory（滚动摘要 + 窗口）
 - **数据模型** — `ElementInfo` 新增 `frame_path: tuple[str, ...]`（空元组=主页面，保持旧调用兼容）；`element_id` 跨 frame 全局唯一。
 - **递归 Snapshot** — `SnapshotGenerator` 递归遍历 iframe 树（`_iter_scopes` / `_walk_scopes` / `_frame_segments`）；iframe 定位段优先级 id → name → 父内位置 `nth=j`，重复 id/name 一律用位置索引消歧；子 frame 加载有有限超时等待（`asyncio.wait_for` 兜底），超时只跳过该帧。
 - **执行可达** — `Executor` 构建 `element_id → frame_path` 映射并透传 `BrowserTool._locator`，逐层 `frame_locator(seg)` 穿透后再定位元素；`target_id` 命中时优先于注入的 `params["selector"]`。
-- **失效恢复** — frame 导航/重建后旧路径作废，需重新 `observe()` 解析 `target_id`；模型上下文不含 selector / frame_path（只暴露 `target_id`）。
-- **测试** — 真实 Playwright Chromium 三层 iframe fixture（`tests/test_snapshot_frame.py`），覆盖递归提取、frame_path 生成、重复 id 消歧、主页面零回归。
+- **失效恢复** — frame 导航/重建后旧路径作废，需重新 `observe()` 解析 `target_id`；模型上下文不含 selector / frame\_path（只暴露 `target_id`）。
+- **测试** — 真实 Playwright Chromium 三层 iframe fixture（`tests/test_snapshot_frame.py`），覆盖递归提取、frame\_path 生成、重复 id 消歧、主页面零回归。
 
 **可点击文本识别（V1.0 子计划 A 增强）** — `p/span/div/li/td/label` 带交互属性（`onclick`/`gcode`/`data-source`/`data-id`/`data-code`/`data-action`、`role=link|button`）或 `cursor:pointer`（排除 `div`/`td` 布局容器）的文本元素并入 `buttons` 交互元素，每帧上限 50。解决 ERP 系统用 `div/span/p` 充当点击入口、Snapshot 只见文本而 LLM 无法点击的问题（如 ydgx 应用中心「集团统建应用」「财务共享」入口）。
 
@@ -290,7 +315,7 @@ pytest
 
 ## demo 功能说明
 
-### manual_demo.py — 百度搜索 RPA 流程
+### manual\_demo.py — 百度搜索 RPA 流程
 
 演示 Browser Tool 的完整 RPA 流程：
 
@@ -305,11 +330,12 @@ pytest
 
 ## 开发路线
 
-| 版本 | 目标 | 状态 |
-| :--- | :--- | :--- |
-| V0.1 | 执行层：Browser Tool + Snapshot + Observation + Schema | ✅ 完成 |
-| V0.2 | Agent Loop：规则驱动 Planner + 执行契约加固 | ✅ 完成 |
-| V0.3 | 接入 LLM：LLM Planner（LLMClient 抽象 + LLMPlanner + 安全序列化 + OpenAI Provider） | ✅ 完成 |
-| V0.4 | Reflection：错误恢复与重试（任务步骤队列 / 停滞检测 / 异常防护 / 失败重试 / LLM 重试 / 后退刷新恢复） | ✅ 完成 |
-| V0.5 | Memory：历史操作与上下文记忆（增量摘要 + 滑动窗口 + 上下文压缩） | ✅ 完成 |
-| V1.0 | 完整 Agentic RPA：多层 iframe 操作基座（子计划 A）已完成；登录/查询/下载/上传/Excel 处理 | 🚧 子计划 A 完成，其余规划中 |
+| 版本   | 目标                                                                      | 状态                |
+| :--- | :---------------------------------------------------------------------- | :---------------- |
+| V0.1 | 执行层：Browser Tool + Snapshot + Observation + Schema                      | ✅ 完成              |
+| V0.2 | Agent Loop：规则驱动 Planner + 执行契约加固                                        | ✅ 完成              |
+| V0.3 | 接入 LLM：LLM Planner（LLMClient 抽象 + LLMPlanner + 安全序列化 + OpenAI Provider） | ✅ 完成              |
+| V0.4 | Reflection：错误恢复与重试（任务步骤队列 / 停滞检测 / 异常防护 / 失败重试 / LLM 重试 / 后退刷新恢复）       | ✅ 完成              |
+| V0.5 | Memory：历史操作与上下文记忆（增量摘要 + 滑动窗口 + 上下文压缩）                                  | ✅ 完成              |
+| V1.0 | 完整 Agentic RPA：多层 iframe 操作基座（子计划 A）已完成；登录/查询/下载/上传/Excel 处理            | 🚧 子计划 A 完成，其余规划中 |
+

@@ -39,3 +39,8 @@ providers:
     base_url: https://api.minimax.cn/v1
     model: MiniMax-M3
     env_key: MINIMAX_API_KEY
+  # OrcaRouter 通用路由器（多模型路由/中转，OpenAI 兼容端点）
+  orcarouter:
+    base_url: https://api.orcarouter.ai/v1
+    model: orcarouter/auto
+    env_key: ORCA_KEY
