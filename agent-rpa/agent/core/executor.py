@@ -132,7 +132,8 @@ class Executor:
             return Observation.fail(error="input 动作缺少 value")
         selector = self._resolve_target(action)
         if selector:
-            logger.debug("input → selector: {} | value: {}", selector, str(action.value)[:80])
+            # 输入值可能包含凭据或业务数据，不写入日志。
+            logger.debug("input → selector: {} | value: [已隐藏]", selector)
             return await self._tool.input(
                 selector,
                 action.value,

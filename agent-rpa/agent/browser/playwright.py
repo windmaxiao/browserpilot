@@ -237,7 +237,8 @@ class BrowserTool:
         frame_path=(),
     ) -> Observation:
         """输入文本"""
-        logger.info("⌨️ input: {} | text: {}", selector, text[:80])
+        # 输入值可能包含密码、令牌或业务数据，不写入日志。
+        logger.info("⌨️ input: {} | text: [已隐藏]", selector)
         start = time.time()
         try:
             locator = self._locator(selector, frame_path)
@@ -253,9 +254,12 @@ class BrowserTool:
             )
         except Exception as e:
             elapsed = time.time() - start
-            logger.error("❌ input 失败 | selector: {} | {:.1f}s | 错误: {}",
-                         selector, elapsed, e)
-            return Observation.fail(error=f"输入失败: {e}", url=self._page.url)
+            # Playwright 异常的 call log 可能回显 fill 参数；只记录异常类型。
+            logger.error("❌ input 失败 | selector: {} | {:.1f}s | 错误类型: {}",
+                         selector, elapsed, type(e).__name__)
+            return Observation.fail(
+                error=f"输入失败（{type(e).__name__}）", url=self._page.url,
+            )
 
     async def select(
         self,

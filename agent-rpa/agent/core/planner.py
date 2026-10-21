@@ -720,9 +720,11 @@ class LLMPlanner(Planner):
         failed = {
             "action": action.action,
             "target": action.target,
-            "value": action.value,
             "target_id": action.target_id,
         }
+        # 失败反思会把该对象发送给 LLM；不要将 input 的实际文本外发。
+        if action.action != "input":
+            failed["value"] = action.value
         user_prompt = (
             f"{base}\n\n"
             f"你刚执行的动作失败了：{json.dumps(failed, ensure_ascii=False)}\n"

@@ -561,7 +561,9 @@ class Agent:
             执行结果 Observation
         """
         log_action = f"{action.action}({action.target})"
-        if action.value:
+        if action.value and action.action == "input":
+            log_action += " = [已隐藏]"
+        elif action.value:
             log_action += f" = {str(action.value)[:50]}"
         logger.info("⚡ 手动执行: {}", log_action)
         # 走 _safe_execute：浏览器被关闭等异常返回失败 Observation 而非崩溃（#8）
@@ -600,7 +602,9 @@ class Agent:
         entry 同时被 ``Agent.history``（完整原始列表）与 ``HistoryMemory``
         （只读引用）持有；写入后触发记忆折叠，超出窗口的旧批次被压缩为摘要。
         """
-        entry = {"step": step, "action": action, "observation": observation}
+        # Agent.history 对调用方可见；避免把输入类动作的真实值长期留在历史中。
+        recorded_action = replace(action, value="[已隐藏]") if action.action == "input" else action
+        entry = {"step": step, "action": recorded_action, "observation": observation}
         self._history.append(entry)
         self._memory.add(entry)
         await self._memory.maybe_summarize()
@@ -855,7 +859,9 @@ class Agent:
     def _log_action(self, action: Action, step: int) -> None:
         """记录 Action 摘要（value 可能为 int，统一转字符串防切片崩溃）。"""
         log_action = f"{action.action}({action.target})"
-        if action.value:
+        if action.value and action.action == "input":
+            log_action += " = [已隐藏]"
+        elif action.value:
             log_action += f" = {str(action.value)[:50]}"
         if action.target_id:
             log_action += f" [{action.target_id}]"
